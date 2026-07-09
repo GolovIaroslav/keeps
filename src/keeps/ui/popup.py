@@ -6,7 +6,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -16,7 +15,6 @@ from PySide6.QtCore import (
     QMimeData,
     QModelIndex,
     QObject,
-    QSettings,
     QSize,
     Qt,
     QTimer,
@@ -26,7 +24,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent
 from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QListView, QVBoxLayout, QWidget
 
-from keeps import paste
+from keeps import config, paste
 from keeps.store import Clip, Store
 from keeps.ui.delegate import ClipItemDelegate
 
@@ -46,13 +44,6 @@ _NAV_KEYS = {
     Qt.Key.Key_Home,
     Qt.Key.Key_End,
 }
-
-
-def _settings_path() -> Path:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    directory = config_home / "keeps"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / "keeps.ini"
 
 
 class ClipListModel(QAbstractListModel):
@@ -127,7 +118,7 @@ class PopupWindow(QWidget):
         self._edit_watcher.fileChanged.connect(self._on_edited_file_changed)
         self._edit_sessions: dict[str, int] = {}
 
-        self._settings = QSettings(str(_settings_path()), QSettings.Format.IniFormat)
+        self._settings = config.open_settings()
         size = self._settings.value("popup/size")
         self.resize(size if size is not None else DEFAULT_SIZE)
 
@@ -257,9 +248,9 @@ class PopupWindow(QWidget):
         # Plain-vs-rich is already decided by what's on the clipboard
         # (_set_clipboard above); injection just replays Ctrl+V.
         del clip_id, plain_only
-        if not self._settings.value("paste/enabled", True, type=bool):
+        if not config.get(self._settings, "paste/enabled"):
             return
-        delay_ms = int(self._settings.value("paste/delay_ms", 150))
+        delay_ms = int(config.get(self._settings, "paste/delay_ms"))
         backend = paste.session_backend()
         QTimer.singleShot(delay_ms, lambda: self._run_paste_injection(backend))
 
