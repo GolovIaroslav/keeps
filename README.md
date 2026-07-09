@@ -2,7 +2,7 @@
 
 A [Ditto](https://github.com/sabrogden/Ditto)-inspired clipboard manager for Linux. Wayland-first, KDE-first, light and fast.
 
-> **Status: MVP in progress.** Core clipboard history, popup, auto-paste, hotkey, tray, and settings all work day-to-day on KDE Plasma Wayland. Not yet packaged or tagged as a release — expect rough edges.
+> **Status: v0.2.0.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. AUR packaging is not done yet — install from source or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
 
 ## Why
 
@@ -15,26 +15,32 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 - **Predictable ordering**: a used item always jumps to the top. Always.
 - **Multi-format**: plain text, rich text (HTML), images, file lists. Paste-as-plain-text with one key.
 - History in SQLite (survives reboots), pinned items, tray icon, autostart, GUI settings.
-- No telemetry, no accounts, no network calls (an opt-in AI search mode with a one-time model download is planned).
+- No telemetry, no accounts, no network calls except an explicit, opt-in AI model download (semantic text search + OCR).
 
-## Install (Arch Linux)
+## Install
+
+### AppImage (any distro)
+
+Download the latest `keeps-*-x86_64.AppImage` from [Releases](https://github.com/GolovIaroslav/keeps/releases), `chmod +x` it, and run. Still needs `wl-clipboard` (Wayland) and, optionally, `ydotool` for auto-paste from the host system — see `keeps status` after first run.
+
+### From source (Arch Linux)
 
 ```sh
-sudo pacman -S pyside6 wl-clipboard ydotool tesseract tesseract-data-eng tesseract-data-rus
+sudo pacman -S pyside6 wl-clipboard ydotool
 git clone https://github.com/GolovIaroslav/keeps
 cd keeps
 uv sync
 uv run keeps
 ```
 
-`ydotool` and `tesseract` are optional: without `ydotool`, Keeps still copies to the clipboard but can't auto-paste; `tesseract` is only needed for the future OCR feature. Run `keeps status` to check what's available.
+`ydotool` is optional: without it, Keeps still copies to the clipboard but can't auto-paste. For the opt-in AI search (OCR + semantic text search), also run `uv sync --extra ai` — model weights are downloaded separately, on request, from the app's own Model management settings. Run `keeps status` to check what's available.
 
 ## Usage
 
 - `keeps` — start the background daemon (or toggle the popup if it's already running).
 - `keeps toggle` — same, but always show the popup on first launch.
 - `keeps show` — show the popup without toggling it closed.
-- `keeps status` — run diagnostics (wl-paste, ydotool, kglobalaccel, session type, Klipper, tesseract).
+- `keeps status` — run diagnostics (wl-paste, ydotool, kglobalaccel, session type, Klipper, AI models).
 
 The tray icon has Show / Pause capture / Settings / Quit. Settings (`general`/`capture`/`ai` tabs) live at `~/.config/keeps/keeps.ini`.
 
@@ -52,6 +58,7 @@ The tray icon has Show / Pause capture / Settings / Quit. Settings (`general`/`c
 | `Ctrl+E` | edit in an external editor |
 | `Ctrl+P` | pin/unpin |
 | `Ctrl+1..9` | paste the Nth visible item |
+| `Ctrl+M` | cycle search mode: blended → keywords → meaning (only when AI text search is enabled) |
 | `Esc` / focus loss | hide popup |
 
 On KDE, the global hotkey is registered via KGlobalAccel; on plain X11 desktops it falls back to a direct XGrabKey. Neither works on non-KDE Wayland compositors (e.g. GNOME, Sway) — bind `keeps toggle` to a key in your compositor's own shortcut settings instead.

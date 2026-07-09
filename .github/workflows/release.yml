@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install portable Python 3.12
+        run: uv python install 3.12
+
+      - name: Install Breeze icon theme (for the bundled app icon)
+        run: sudo apt-get update && sudo apt-get install -y breeze-icon-theme
+
+      - name: Build AppDir
+        run: |
+          set -euo pipefail
+          PYROOT="$(dirname "$(dirname "$(uv python find 3.12)")")"
+          APPDIR="$PWD/AppDir"
+          mkdir -p "$APPDIR/usr"
+          cp -a "$PYROOT" "$APPDIR/usr/python312"
+
+          # Installs into the copied interpreter's own site-packages (not a venv,
+          # which would symlink back to $PYROOT and break once $PYROOT is gone) --
+          # this keeps the AppDir fully self-contained and relocatable, verified
+          # locally by moving the tree and re-running `python -m keeps` from the
+          # new path before writing this workflow.
+          "$APPDIR/usr/python312/bin/python3.12" -m pip install --break-system-packages --no-input ".[ai]"
+
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/python312/bin/python3.12" -c "from keeps.app import main; main()" "$@"' \
+            > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          cp packaging/keeps.desktop "$APPDIR/keeps.desktop"
+          ICON="$(find /usr/share/icons/breeze -iname 'edit-paste.svg' | sort | tail -1)"
+          cp "$ICON" "$APPDIR/edit-paste.svg"
+
+      - name: Download appimagetool
+        run: |
+          curl -sL -o appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Build AppImage
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "keeps-${VERSION}-x86_64.AppImage"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keeps-appimage
+          path: keeps-*-x86_64.AppImage
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" || true
+          gh release upload "$GITHUB_REF_NAME" keeps-*-x86_64.AppImage --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
