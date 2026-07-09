@@ -120,6 +120,23 @@ def unclip_box(points, ratio: float = DET_UNCLIP_RATIO):
     return points + offset
 
 
+def order_points_clockwise(points):
+    """Reorder 4 arbitrary quad points to [top-left, top-right, bottom-right,
+    bottom-left]. `cv2.boxPoints` returns points in an order that shifts with
+    the rectangle's rotation angle, not a fixed corner -- feeding them
+    unordered into `cv2.getPerspectiveTransform` warps the crop into a
+    rotated/mirrored image instead of an upright one (PaddleOCR's own
+    `get_mini_boxes` does the same reorder before cropping).
+    """
+    import numpy as np
+
+    pts = sorted(points, key=lambda p: p[0])
+    left, right = sorted(pts[:2], key=lambda p: p[1]), sorted(pts[2:], key=lambda p: p[1])
+    top_left, bottom_left = left
+    top_right, bottom_right = right
+    return np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+
+
 def _postprocess_detection(prob_map, orig_shape, resized_shape):
     import cv2
     import numpy as np
@@ -135,7 +152,7 @@ def _postprocess_detection(prob_map, orig_shape, resized_shape):
         if cv2.contourArea(contour) < DET_MIN_BOX_AREA:
             continue
         rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect)
+        box = order_points_clockwise(cv2.boxPoints(rect))
 
         mask = np.zeros(prob_map.shape, dtype=np.uint8)
         cv2.fillPoly(mask, [box.astype(np.int32)], 1)

@@ -80,12 +80,8 @@ class TextEmbedder:
         encoding = self._tokenizer.encode(text)
         input_ids = np.array([encoding.ids], dtype=np.int64)
         attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
-        # Input names assumed from the standard ModernBERT ONNX export
-        # (no token_type_ids -- this architecture has no NSP head). Not yet
-        # confirmed against the real graph's input names since the weights
-        # haven't been downloaded (PLAN.md §9) -- verify with
-        # `session.get_inputs()` against the actual file before the first
-        # live smoke test and adjust here if they differ.
+        # Input names confirmed live against the real ONNX graph (session.get_inputs()):
+        # input_ids/attention_mask only, no token_type_ids (PLAN.md §9).
         outputs = self._session.run(
             None, {"input_ids": input_ids, "attention_mask": attention_mask}
         )

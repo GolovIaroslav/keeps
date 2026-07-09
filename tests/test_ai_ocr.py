@@ -8,6 +8,7 @@ from keeps.ai.ocr import (
     ctc_greedy_decode,
     decode_indices,
     load_char_list,
+    order_points_clockwise,
     unclip_box,
 )
 
@@ -119,3 +120,38 @@ def test_postprocess_detection_ignores_tiny_noise_below_min_area():
     prob_map[0, 0, 5:8, 5:8] = 0.9  # 3x3=9px, above DET_THRESH but below DET_MIN_BOX_AREA=16
     boxes = _postprocess_detection(prob_map, orig_shape=(64, 64), resized_shape=(64, 64))
     assert boxes == []
+
+
+# Regression test for a real bug: cv2.boxPoints(rect) returns the 4 corners
+# starting from whichever one happens to be first for that rectangle's
+# rotation angle, not always top-left. Feeding an unordered quad into
+# cv2.getPerspectiveTransform's dst=[top-left, top-right, bottom-right,
+# bottom-left] mapping silently rotated/mirrored every recognition crop --
+# caught by a live OCR smoke test on a synthetic image (garbage output),
+# not by the unit tests, because none of them exercised a box whose
+# starting corner wasn't already top-left.
+ORDER_POINTS_CASES = [
+    # (unordered input corners, expected [TL, TR, BR, BL] order)
+    (
+        [(0, 0), (10, 0), (10, 10), (0, 10)],  # already TL,TR,BR,BL
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+    ),
+    (
+        [(10, 10), (0, 10), (0, 0), (10, 0)],  # starts at BR (rotated cv2.boxPoints order)
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+    ),
+    (
+        [(0, 10), (0, 0), (10, 0), (10, 10)],  # starts at BL
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+    ),
+    (
+        [(10, 0), (10, 10), (0, 10), (0, 0)],  # starts at TR
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+    ),
+]
+
+
+@pytest.mark.parametrize("scrambled,expected", ORDER_POINTS_CASES)
+def test_order_points_clockwise_normalizes_any_starting_corner(scrambled, expected):
+    ordered = order_points_clockwise(scrambled)
+    np.testing.assert_array_equal(ordered, np.array(expected, dtype=np.float32))
