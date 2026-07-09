@@ -22,9 +22,19 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent
-from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QListView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QVBoxLayout,
+    QWidget,
+)
 
 from keeps import config, paste
+from keeps.ai import ranking
+from keeps.ai.runtime import AiRuntime
 from keeps.store import Clip, Store
 from keeps.ui.delegate import ClipItemDelegate
 
@@ -45,16 +55,56 @@ _NAV_KEYS = {
     Qt.Key.Key_End,
 }
 
+_MODE_BADGE_LABELS = {
+    ranking.SearchMode.BLENDED: "blended",
+    ranking.SearchMode.KEYWORD: "keywords",
+    ranking.SearchMode.SEMANTIC: "meaning",
+}
+
 
 class ClipListModel(QAbstractListModel):
-    def __init__(self, store: Store, parent: QObject | None = None) -> None:
+    def __init__(
+        self, store: Store, ai_runtime: AiRuntime | None = None, parent: QObject | None = None
+    ) -> None:
         super().__init__(parent)
         self._store = store
+        self._ai_runtime = ai_runtime
         self._clips: list[Clip] = []
+        self._current_query = ""
+        self._semantic_scores: dict[int, int] = {}
 
     def set_query(self, query: str) -> None:
+        self._current_query = query
+        self._semantic_scores = {}
+        self._rebuild()
+        if self._ai_runtime is not None and self._ai_runtime.rag_text_enabled and query.strip():
+            self._ai_runtime.encode_query_async(query, self._on_semantic_scores)
+
+    def _on_semantic_scores(self, query: str, scores: dict[int, float]) -> None:
+        if query != self._current_query:
+            return  # a newer keystroke already superseded this search
+        self._semantic_scores = scores
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        substring_clips = self._store.search(self._current_query)
+        rag_active = (
+            self._ai_runtime is not None
+            and self._ai_runtime.rag_text_enabled
+            and bool(self._current_query.strip())
+        )
+        if rag_active:
+            clips_by_id = {clip.id: clip for clip in self._store.all()}
+            clips = ranking.blend(
+                substring_clips,
+                self._semantic_scores,
+                clips_by_id,
+                mode=self._ai_runtime.search_mode,
+            )
+        else:
+            clips = substring_clips
         self.beginResetModel()
-        self._clips = self._store.search(query)
+        self._clips = clips
         self.endResetModel()
 
     def clip_at(self, row: int) -> Clip:
@@ -78,7 +128,9 @@ class PopupWindow(QWidget):
     # copies without emitting this.
     paste_requested = Signal(int, bool)  # (clip_id, plain_only)
 
-    def __init__(self, store: Store, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, store: Store, ai_runtime: AiRuntime | None = None, parent: QWidget | None = None
+    ) -> None:
         # Qt.WindowType.Popup would give us free hide-on-outside-click, but its
         # Wayland grab requires a focused transient parent — we have none (a
         # global hotkey triggers us, not another widget). So: a plain
@@ -90,11 +142,18 @@ class PopupWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.store = store
-        self.model = ClipListModel(store)
+        self._ai_runtime = ai_runtime
+        self.model = ClipListModel(store, ai_runtime)
 
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText(self.tr("Search clips..."))
         self.search_edit.installEventFilter(self)
+
+        # Search-mode badge (Ctrl+M cycles blended/keywords/meaning) -- only
+        # shown when ai/rag_text_enabled, since there's nothing to switch
+        # between otherwise (PLAN.md §9).
+        self._mode_badge = QLabel(self)
+        self._mode_badge.setVisible(False)
 
         self.list_view = QListView(self)
         self.list_view.setModel(self.model)
@@ -103,9 +162,13 @@ class PopupWindow(QWidget):
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.doubleClicked.connect(self._on_double_clicked)
 
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search_edit)
+        search_row.addWidget(self._mode_badge)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(self.search_edit)
+        layout.addLayout(search_row)
         layout.addWidget(self.list_view)
 
         self._debounce = QTimer(self)
@@ -128,6 +191,7 @@ class PopupWindow(QWidget):
 
     def show_popup(self) -> None:
         self.search_edit.clear()
+        self._update_mode_badge()
         self.refresh()
         self._select_row(0)
         self.show()
@@ -203,6 +267,9 @@ class PopupWindow(QWidget):
         if ctrl and key == Qt.Key.Key_P:
             self._toggle_pin_current()
             return True
+        if ctrl and key == Qt.Key.Key_M:
+            self._cycle_search_mode()
+            return True
         if ctrl and Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             row = key - Qt.Key.Key_1
             if row < self.model.rowCount():
@@ -266,6 +333,19 @@ class PopupWindow(QWidget):
         self.store.delete(clip.id)
         self.refresh()
         self._select_row(min(row, self.model.rowCount() - 1))
+
+    def _cycle_search_mode(self) -> None:
+        if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
+            return  # nothing to switch between when RAG is off (PLAN.md §9)
+        self._ai_runtime.search_mode = self._ai_runtime.search_mode.next()
+        self._update_mode_badge()
+        self.refresh()
+
+    def _update_mode_badge(self) -> None:
+        rag_on = self._ai_runtime is not None and self._ai_runtime.rag_text_enabled
+        self._mode_badge.setVisible(rag_on)
+        if rag_on:
+            self._mode_badge.setText(f"[{_MODE_BADGE_LABELS[self._ai_runtime.search_mode]}]")
 
     def _toggle_pin_current(self) -> None:
         row = self._current_row()
