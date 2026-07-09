@@ -8,6 +8,7 @@ from keeps.capture.base import (
     SelfSetGuard,
     build_bundle,
     detect_kind,
+    should_store,
 )
 from keeps.store import Store
 
@@ -79,6 +80,22 @@ def test_self_set_guard_skips_once_within_window():
 def test_self_set_guard_no_skip_without_mark():
     guard = SelfSetGuard()
     assert guard.consume_skip() is False
+
+
+SHOULD_STORE_CASES = [
+    ("text", True, True, True, True),
+    ("html", True, True, True, True),
+    ("html", False, True, True, False),
+    ("image", True, True, True, True),
+    ("image", True, False, True, False),
+    ("files", True, True, True, True),
+    ("files", True, True, False, False),
+]
+
+
+@pytest.mark.parametrize("kind,store_html,store_images,store_files,expected", SHOULD_STORE_CASES)
+def test_should_store(kind, store_html, store_images, store_files, expected):
+    assert should_store(kind, store_html, store_images, store_files) == expected
 
 
 BUNDLE_TO_CLIP_CASES = [

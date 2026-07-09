@@ -74,6 +74,17 @@ def build_bundle(
     return kind, bundle
 
 
+def should_store(kind: str, store_html: bool, store_images: bool, store_files: bool) -> bool:
+    """Whether a captured clip of this kind should be kept (PLAN.md §7 capture/* toggles)."""
+    if kind == "html":
+        return store_html
+    if kind == "image":
+        return store_images
+    if kind == "files":
+        return store_files
+    return True
+
+
 class SelfSetGuard:
     """Skips the single clipboard-change event that follows our own clipboard write."""
 
