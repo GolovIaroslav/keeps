@@ -145,6 +145,43 @@ class Store:
         self._conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
         self._conn.commit()
 
+    def update_content(self, clip_id: int, mime_data: dict[str, bytes]) -> int:
+        """Replace a clip's content in place (used by external-editor Ctrl+E).
+
+        Kind is preserved. If the edited content now matches another existing
+        clip's hash, the two are merged (this clip is dropped, the other is
+        touched) per the dedup invariant. Returns the resulting clip id.
+        """
+        row = self._conn.execute(
+            "SELECT kind FROM clips WHERE id = ?", (clip_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no such clip: {clip_id}")
+        kind = row["kind"]
+        new_hash = hashlib.sha256(_canonical_bytes(kind, mime_data)).hexdigest()
+
+        existing = self._conn.execute(
+            "SELECT id FROM clips WHERE hash = ? AND id != ?", (new_hash, clip_id)
+        ).fetchone()
+        if existing is not None:
+            self.delete(clip_id)
+            self.touch(existing["id"])
+            return existing["id"]
+
+        preview = build_preview(kind, mime_data)
+        now = int(time.time() * 1000)
+        self._conn.execute(
+            "UPDATE clips SET preview = ?, hash = ?, last_used_at = ? WHERE id = ?",
+            (preview, new_hash, now, clip_id),
+        )
+        self._conn.execute("DELETE FROM clip_data WHERE clip_id = ?", (clip_id,))
+        self._conn.executemany(
+            "INSERT INTO clip_data (clip_id, mime, data) VALUES (?, ?, ?)",
+            [(clip_id, mime, data) for mime, data in mime_data.items()],
+        )
+        self._conn.commit()
+        return clip_id
+
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
         self._conn.execute(
             "UPDATE clips SET pinned = ? WHERE id = ?", (int(pinned), clip_id)

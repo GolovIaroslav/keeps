@@ -114,6 +114,47 @@ def test_build_preview_truncates_long_text():
     assert len(preview) == 300
 
 
+def test_update_content_replaces_data_and_preview(store):
+    clip_id = store.add("text", {"text/plain": b"before"})
+    old_hash = store.all()[0].hash
+
+    result_id = store.update_content(clip_id, {"text/plain": b"after"})
+
+    assert result_id == clip_id
+    clip = store.all()[0]
+    assert clip.preview == "after"
+    assert clip.hash != old_hash
+    assert store.get_data(clip_id) == {"text/plain": b"after"}
+
+
+def test_update_content_bumps_to_top(store):
+    a = store.add("text", {"text/plain": b"a"})
+    time.sleep(0.002)
+    store.add("text", {"text/plain": b"b"})
+    time.sleep(0.002)
+
+    store.update_content(a, {"text/plain": b"a-edited"})
+
+    assert store.all()[0].id == a
+
+
+def test_update_content_merges_into_existing_hash(store):
+    keep = store.add("text", {"text/plain": b"target"})
+    to_edit = store.add("text", {"text/plain": b"original"})
+
+    result_id = store.update_content(to_edit, {"text/plain": b"target"})
+
+    assert result_id == keep
+    ids = {clip.id for clip in store.all()}
+    assert to_edit not in ids, "edited clip must be dropped when it now duplicates another"
+    assert keep in ids
+
+
+def test_update_content_unknown_clip_raises(store):
+    with pytest.raises(ValueError):
+        store.update_content(999, {"text/plain": b"x"})
+
+
 def test_add_and_search_5000_records_is_fast(tmp_path):
     store = Store(tmp_path / "keeps.db", max_items=10_000)
     start = time.perf_counter()
