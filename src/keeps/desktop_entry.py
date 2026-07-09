@@ -6,6 +6,13 @@ generic "System services" heading instead of showing it as a proper
 Application with an icon (unlike `autostart.py`'s entry, which is
 `NoDisplay=true` and lives in `~/.config/autostart/`, not meant to be seen
 in an app menu).
+
+This is the fallback for people running Keeps straight from a source
+checkout (`uv run keeps`), where no package manager installs a desktop
+file for them. Packaged installs (Ф8: AUR, AppImage) ship their own copy
+of `packaging/keeps.desktop` instead -- see PLAN.md §10. The content below
+must be kept in sync with that file by hand until Ф8 wires up a real
+build step to generate one from the other.
 """
 
 from __future__ import annotations

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Keeps
+Comment=Clipboard manager
+Exec=keeps
+Icon=edit-paste
+Categories=Utility;
