@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from keeps.ai import models
+
 
 @dataclass(frozen=True)
 class Check:
@@ -76,10 +78,10 @@ def check_klipper(runner: Callable[..., subprocess.CompletedProcess]) -> Check:
     return Check("Klipper", not running, detail)
 
 
-def check_tesseract(which: Callable[[str], str | None]) -> Check:
-    found = which("tesseract") is not None
-    detail = "found" if found else "optional: install for OCR search"
-    return Check("tesseract (AI/OCR)", found, detail)
+def check_ocr_model() -> Check:
+    downloaded = models.is_downloaded(models.OCR)
+    detail = "downloaded" if downloaded else "optional: download in Settings > AI to enable OCR"
+    return Check("OCR model (PP-OCRv5)", downloaded, detail)
 
 
 def run_all(
@@ -96,5 +98,5 @@ def run_all(
         check_session_type(env),
         check_kglobalaccel(runner),
         check_klipper(runner),
-        check_tesseract(which),
+        check_ocr_model(),
     ]

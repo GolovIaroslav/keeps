@@ -1,11 +1,12 @@
 import subprocess
 
+from keeps.ai import models
 from keeps.diagnostics import (
     check_kglobalaccel,
     check_klipper,
+    check_ocr_model,
     check_paste_injector,
     check_session_type,
-    check_tesseract,
     check_uinput_access,
     check_wl_paste,
     run_all,
@@ -94,9 +95,19 @@ def test_check_klipper_running_is_not_ok():
     assert check.ok is False
 
 
-def test_check_tesseract_optional():
-    assert check_tesseract(_which({"tesseract"})).ok is True
-    assert check_tesseract(_which(set())).ok is False
+def test_check_ocr_model_not_downloaded(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert check_ocr_model().ok is False
+
+
+def test_check_ocr_model_downloaded(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    for f in models.OCR.files:
+        dest = models.file_dest(models.OCR, f)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"0" * f.size_bytes)
+
+    assert check_ocr_model().ok is True
 
 
 def test_run_all_returns_seven_checks():
