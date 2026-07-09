@@ -141,11 +141,15 @@ def _run_daemon(show_immediately: bool) -> int:
     from PySide6.QtNetwork import QLocalServer
     from PySide6.QtWidgets import QApplication
 
+    from keeps import desktop_entry
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
     from keeps.ui.tray import TrayIcon
 
+    desktop_entry.ensure_installed()
+
     qt_app = QApplication(sys.argv)
+    qt_app.setDesktopFileName("keeps")  # associates KGlobalAccel/tray with our .desktop entry
     qt_app.setQuitOnLastWindowClosed(False)  # popup/settings hide, they don't end the daemon
 
     settings = config.open_settings()
