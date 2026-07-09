@@ -155,6 +155,57 @@ def test_update_content_unknown_clip_raises(store):
         store.update_content(999, {"text/plain": b"x"})
 
 
+def test_search_matches_ocr_text(store):
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_ocr_text(clip_id, "распознанный текст на скриншоте")
+    store.add("text", {"text/plain": b"unrelated"})
+
+    results = store.search("скриншоте")
+    assert len(results) == 1
+    assert results[0].id == clip_id
+
+
+def test_search_ocr_text_independent_of_preview_match(store):
+    # A clip whose preview doesn't contain the query but whose ocr_text does
+    # must still be found -- plain substring search always covers ocr_text
+    # (PLAN.md §9), independent of any ai/* toggle.
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_ocr_text(clip_id, "invoice number 42")
+
+    assert [c.id for c in store.search("invoice")] == [clip_id]
+
+
+def test_set_embedding_and_get_all_embeddings(store):
+    a = store.add("text", {"text/plain": b"first"})
+    b = store.add("text", {"text/plain": b"second"})
+    store.set_embedding(a, "model-x", b"vec-a")
+    store.set_embedding(b, "model-x", b"vec-b")
+
+    results = dict(store.get_all_embeddings("model-x"))
+    assert results == {a: b"vec-a", b: b"vec-b"}
+    assert store.get_all_embeddings("other-model") == []
+
+
+def test_set_embedding_overwrites_on_conflict(store):
+    clip_id = store.add("text", {"text/plain": b"x"})
+    store.set_embedding(clip_id, "model-x", b"old-vec")
+    store.set_embedding(clip_id, "model-y", b"new-vec")
+
+    results = store.get_all_embeddings("model-y")
+    assert results == [(clip_id, b"new-vec")]
+    assert store.get_all_embeddings("model-x") == []
+
+
+def test_clips_missing_ocr_lists_only_image_clips_without_ocr_text(store):
+    with_ocr = store.add("image", {"image/png": PNG_1X1})
+    store.set_ocr_text(with_ocr, "already scanned")
+    other_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])  # distinct hash, same valid header
+    without_ocr = store.add("image", {"image/png": other_png})
+    store.add("text", {"text/plain": b"not an image"})
+
+    assert store.clips_missing_ocr() == [without_ocr]
+
+
 def test_add_and_search_5000_records_is_fast(tmp_path):
     store = Store(tmp_path / "keeps.db", max_items=10_000)
     start = time.perf_counter()

@@ -17,9 +17,12 @@ DEFAULTS: dict[str, bool | int | str] = {
     "capture/store_html": True,
     "capture/store_images": True,
     "capture/store_files": True,
+    "ai/rag_text_enabled": False,
     "ai/ocr_enabled": False,
-    "ai/semantic_enabled": False,
-    "ai/ocr_langs": "rus+eng",
+    "ai/image_semantic_enabled": False,
+    "ai/ocr_timing": "delayed",
+    "ai/ocr_delay_seconds": 10,
+    "ai/model_idle_unload_minutes": 10,
 }
 
 

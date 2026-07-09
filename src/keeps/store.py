@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS thumbs (
   clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
   png     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS embeddings (
+  clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+  model   TEXT NOT NULL,
+  vec     BLOB NOT NULL
+);
 """
 
 PREVIEW_MAX_CHARS = 300
@@ -213,11 +218,47 @@ class Store:
         return {row["mime"]: row["data"] for row in rows}
 
     def search(self, query: str) -> list[Clip]:
-        """In-memory, casefold-based filter (SQLite LIKE breaks on Cyrillic)."""
+        """In-memory, casefold-based filter (SQLite LIKE breaks on Cyrillic).
+
+        Matches preview and, when present, ocr_text -- OCR-recognized text
+        always participates in plain substring search, independent of any
+        ai/* toggle (PLAN.md §9).
+        """
         needle = normalize(query)
         if not needle:
             return self.all()
-        return [clip for clip in self.all() if needle in normalize(clip.preview)]
+        return [clip for clip in self.all() if self._matches(clip, needle)]
+
+    @staticmethod
+    def _matches(clip: Clip, needle: str) -> bool:
+        if needle in normalize(clip.preview):
+            return True
+        return clip.ocr_text is not None and needle in normalize(clip.ocr_text)
+
+    def set_ocr_text(self, clip_id: int, text: str) -> None:
+        self._conn.execute("UPDATE clips SET ocr_text = ? WHERE id = ?", (text, clip_id))
+        self._conn.commit()
+
+    def set_embedding(self, clip_id: int, model: str, vec: bytes) -> None:
+        self._conn.execute(
+            "INSERT INTO embeddings (clip_id, model, vec) VALUES (?, ?, ?) "
+            "ON CONFLICT(clip_id) DO UPDATE SET model = excluded.model, vec = excluded.vec",
+            (clip_id, model, vec),
+        )
+        self._conn.commit()
+
+    def get_all_embeddings(self, model: str) -> list[tuple[int, bytes]]:
+        rows = self._conn.execute(
+            "SELECT clip_id, vec FROM embeddings WHERE model = ?", (model,)
+        ).fetchall()
+        return [(row["clip_id"], row["vec"]) for row in rows]
+
+    def clips_missing_ocr(self) -> list[int]:
+        """Image-clip ids with no ocr_text yet -- used for the OCR backlog sweep."""
+        rows = self._conn.execute(
+            "SELECT id FROM clips WHERE kind = 'image' AND ocr_text IS NULL"
+        ).fetchall()
+        return [row["id"] for row in rows]
 
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> Clip:
