@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,6 +26,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent
 from PySide6.QtWidgets import QAbstractItemView, QLineEdit, QListView, QVBoxLayout, QWidget
 
+from keeps import paste
 from keeps.store import Clip, Store
 from keeps.ui.delegate import ClipItemDelegate
 
@@ -80,8 +82,9 @@ class ClipListModel(QAbstractListModel):
 
 class PopupWindow(QWidget):
     # Emitted after a clip is copied to the clipboard with paste intent
-    # (Enter/Shift+Enter/Ctrl+1..9); Ф4 connects the actual ydotool/xdotool
-    # injection here. Ctrl+C copies without emitting this.
+    # (Enter/Shift+Enter/Ctrl+1..9); connected below to the actual
+    # ydotool/xdotool injection (keeps.paste), after paste/delay_ms. Ctrl+C
+    # copies without emitting this.
     paste_requested = Signal(int, bool)  # (clip_id, plain_only)
 
     def __init__(self, store: Store, parent: QWidget | None = None) -> None:
@@ -128,6 +131,8 @@ class PopupWindow(QWidget):
         size = self._settings.value("popup/size")
         self.resize(size if size is not None else DEFAULT_SIZE)
 
+        self.paste_requested.connect(self._schedule_paste_injection)
+
     # -- lifecycle ---------------------------------------------------------
 
     def show_popup(self) -> None:
@@ -138,6 +143,12 @@ class PopupWindow(QWidget):
         self.raise_()
         self.activateWindow()
         self.search_edit.setFocus()
+
+    def toggle_popup(self) -> None:
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_popup()
 
     def hideEvent(self, event) -> None:
         self._settings.setValue("popup/size", self.size())
@@ -241,6 +252,20 @@ class PopupWindow(QWidget):
                 urls = [QUrl(line) for line in uri_list.decode("utf-8").splitlines() if line]
                 qmime.setUrls(urls)
         QGuiApplication.clipboard().setMimeData(qmime)
+
+    def _schedule_paste_injection(self, clip_id: int, plain_only: bool) -> None:
+        # Plain-vs-rich is already decided by what's on the clipboard
+        # (_set_clipboard above); injection just replays Ctrl+V.
+        del clip_id, plain_only
+        if not self._settings.value("paste/enabled", True, type=bool):
+            return
+        delay_ms = int(self._settings.value("paste/delay_ms", 150))
+        backend = paste.session_backend()
+        QTimer.singleShot(delay_ms, lambda: self._run_paste_injection(backend))
+
+    def _run_paste_injection(self, backend: str) -> None:
+        if not paste.inject_paste(backend, shutil.which, subprocess.run):
+            paste.notify_paste_unavailable(backend, shutil.which)
 
     def _delete_current(self) -> None:
         row = self._current_row()
