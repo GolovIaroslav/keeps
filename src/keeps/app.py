@@ -1,13 +1,16 @@
 import argparse
 import os
+import shutil
 import socket as socket_module
+import subprocess
 import sys
 from pathlib import Path
 
-from keeps import __version__
+from keeps import __version__, config, diagnostics
 from keeps.store import Store
 
 TOGGLE_MESSAGE = b"toggle"
+SHOW_MESSAGE = b"show"
 
 
 def _socket_path() -> str:
@@ -22,8 +25,8 @@ def _default_db_path() -> Path:
     return directory / "keeps.db"
 
 
-def _send_toggle(socket_path: str) -> bool:
-    """Try to deliver a toggle request to an already-running daemon.
+def _send_message(socket_path: str, message: bytes) -> bool:
+    """Try to deliver a request to an already-running daemon.
 
     Plain stdlib socket (not QLocalSocket): QLocalServer's Unix-domain socket
     is connectable this way too, and it lets this check run before any Qt
@@ -33,20 +36,41 @@ def _send_toggle(socket_path: str) -> bool:
         with socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM) as sock:
             sock.settimeout(0.2)
             sock.connect(socket_path)
-            sock.sendall(TOGGLE_MESSAGE)
+            sock.sendall(message)
         return True
     except OSError:
         return False
 
 
-def _make_watcher(store: Store):
+def _make_watcher(store: Store, max_item_mb: float):
     if os.environ.get("WAYLAND_DISPLAY"):
         from keeps.capture.wayland import WaylandWatcher
 
-        return WaylandWatcher(store)
+        return WaylandWatcher(store, max_item_mb=max_item_mb)
     from keeps.capture.x11 import X11Watcher
 
-    return X11Watcher(store)
+    return X11Watcher(store, max_item_mb=max_item_mb)
+
+
+def _make_hotkey(key_sequence: str):
+    """KGlobalAccel (any KDE session) first, XGrabKey (plain X11) as fallback.
+
+    Neither works on non-KDE Wayland; callers must still offer `keeps toggle`.
+    """
+    from keeps.hotkey.kglobalaccel import KGlobalAccelHotkey
+
+    kglobalaccel_hotkey = KGlobalAccelHotkey(key_sequence)
+    if kglobalaccel_hotkey.register():
+        return kglobalaccel_hotkey
+
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        from keeps.hotkey.x11 import XGrabKeyHotkey
+
+        x11_hotkey = XGrabKeyHotkey(key_sequence)
+        if x11_hotkey.register():
+            return x11_hotkey
+
+    return None
 
 
 def _watch_debug() -> int:
@@ -64,7 +88,9 @@ def _watch_debug() -> int:
     original_add = store.add
     store.add = on_add  # type: ignore[method-assign]
 
-    watcher = _make_watcher(store)
+    from keeps.capture.base import DEFAULT_MAX_ITEM_MB
+
+    watcher = _make_watcher(store, DEFAULT_MAX_ITEM_MB)
     watcher.start()
     print("watching clipboard, Ctrl+C to stop...")
     return qt_app.exec()
@@ -111,20 +137,20 @@ def _popup_debug() -> int:
 
 
 def _run_daemon(show_immediately: bool) -> int:
-    """The single-instance background process: capture + popup + global hotkey + IPC.
-
-    `keeps toggle`/hotkey fallback wiring (single instance, tray, autostart)
-    beyond this is the rest of Ф5, deferred to a later session.
-    """
+    """The single-instance background process: capture + popup + global hotkey + tray + IPC."""
     from PySide6.QtNetwork import QLocalServer
     from PySide6.QtWidgets import QApplication
 
-    from keeps.hotkey.kglobalaccel import KGlobalAccelHotkey
     from keeps.ui.popup import PopupWindow
+    from keeps.ui.settings import SettingsDialog
+    from keeps.ui.tray import TrayIcon
 
     qt_app = QApplication(sys.argv)
-    store = Store(_default_db_path())
-    watcher = _make_watcher(store)
+    qt_app.setQuitOnLastWindowClosed(False)  # popup/settings hide, they don't end the daemon
+
+    settings = config.open_settings()
+    store = Store(_default_db_path(), max_items=int(config.get(settings, "general/max_items")))
+    watcher = _make_watcher(store, float(config.get(settings, "general/max_item_mb")))
     watcher.start()
 
     popup = PopupWindow(store)
@@ -142,18 +168,46 @@ def _run_daemon(show_immediately: bool) -> int:
             return
 
         def on_ready_read() -> None:
-            if connection.readAll().data() == TOGGLE_MESSAGE:
+            message = connection.readAll().data()
+            if message == TOGGLE_MESSAGE:
                 popup.toggle_popup()
+            elif message == SHOW_MESSAGE:
+                popup.show_popup()
 
         connection.readyRead.connect(on_ready_read)
 
     server.newConnection.connect(on_new_connection)
 
-    hotkey = KGlobalAccelHotkey("Ctrl+`")
-    if hotkey.register():
+    hotkey = _make_hotkey(str(config.get(settings, "general/hotkey")))
+    if hotkey is not None:
         hotkey.triggered.connect(popup.toggle_popup)
     else:
         print("warning: global hotkey registration failed; use `keeps toggle`", file=sys.stderr)
+
+    tray = TrayIcon()
+    tray.show_requested.connect(popup.show_popup)
+
+    def on_capture_paused_changed(paused: bool) -> None:
+        if paused:
+            watcher.stop()
+        else:
+            watcher.start()
+
+    tray.capture_paused_changed.connect(on_capture_paused_changed)
+
+    def on_settings_requested() -> None:
+        SettingsDialog().exec()
+
+    tray.settings_requested.connect(on_settings_requested)
+
+    def on_quit_requested() -> None:
+        if hotkey is not None:
+            hotkey.unregister()
+        watcher.stop()
+        qt_app.quit()
+
+    tray.quit_requested.connect(on_quit_requested)
+    tray.show()
 
     if show_immediately:
         popup.show_popup()
@@ -161,9 +215,18 @@ def _run_daemon(show_immediately: bool) -> int:
     return qt_app.exec()
 
 
+def _status() -> int:
+    """`keeps status`: run PLAN.md §8 diagnostics and print ✓/✗ results. No daemon needed."""
+    checks = diagnostics.run_all(shutil.which, subprocess.run, Path.exists)
+    for check in checks:
+        mark = "✓" if check.ok else "✗"
+        print(f"{mark} {check.name}: {check.detail}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="keeps")
-    parser.add_argument("command", nargs="?", choices=["toggle"], default=None)
+    parser.add_argument("command", nargs="?", choices=["toggle", "show", "status"], default=None)
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument(
         "--watch-debug", action="store_true", help=argparse.SUPPRESS
@@ -183,9 +246,19 @@ def main() -> int:
     if args.popup_debug:
         return _popup_debug()
 
+    if args.command == "status":
+        return _status()
+
+    socket_path = _socket_path()
+
+    if args.command == "show":
+        if _send_message(socket_path, SHOW_MESSAGE):
+            return 0
+        return _run_daemon(show_immediately=True)
+
     # `keeps` and `keeps toggle` both wake a live daemon; the difference only
     # matters when none is running yet (PLAN.md §4/§11).
-    if _send_toggle(_socket_path()):
+    if _send_message(socket_path, TOGGLE_MESSAGE):
         return 0
     return _run_daemon(show_immediately=(args.command == "toggle"))
 

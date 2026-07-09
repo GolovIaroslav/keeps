@@ -7,7 +7,8 @@ import subprocess
 
 from PySide6.QtCore import QObject, QProcess
 
-from keeps.capture.base import DEFAULT_MAX_ITEM_MB, SelfSetGuard, build_bundle
+from keeps import config
+from keeps.capture.base import DEFAULT_MAX_ITEM_MB, SelfSetGuard, build_bundle, should_store
 from keeps.store import Store
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,19 @@ class WaylandWatcher(QObject):
         if result is None:
             return
         kind, mime_data = result
+        if not self._should_store(kind):
+            return
         self._store.add(kind, mime_data)
+
+    @staticmethod
+    def _should_store(kind: str) -> bool:
+        settings = config.open_settings()
+        return should_store(
+            kind,
+            config.get(settings, "capture/store_html"),
+            config.get(settings, "capture/store_images"),
+            config.get(settings, "capture/store_files"),
+        )
 
     @staticmethod
     def _list_types() -> set[str] | None:

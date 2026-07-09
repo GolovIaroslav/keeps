@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QBuffer, QIODevice, QObject
 from PySide6.QtGui import QClipboard, QGuiApplication, QImage
 
+from keeps import config
 from keeps.capture.base import (
     DEFAULT_MAX_ITEM_MB,
     MIME_HTML,
@@ -13,6 +14,7 @@ from keeps.capture.base import (
     MIME_URI_LIST,
     SelfSetGuard,
     build_bundle,
+    should_store,
 )
 from keeps.store import Store
 
@@ -48,7 +50,19 @@ class X11Watcher(QObject):
         if result is None:
             return
         kind, mime_data = result
+        if not self._should_store(kind):
+            return
         self._store.add(kind, mime_data)
+
+    @staticmethod
+    def _should_store(kind: str) -> bool:
+        settings = config.open_settings()
+        return should_store(
+            kind,
+            config.get(settings, "capture/store_html"),
+            config.get(settings, "capture/store_images"),
+            config.get(settings, "capture/store_files"),
+        )
 
     def _available_types(self) -> set[str]:
         available = set()
