@@ -142,6 +142,7 @@ def _run_daemon(show_immediately: bool) -> int:
     from PySide6.QtWidgets import QApplication
 
     from keeps import desktop_entry
+    from keeps.ai.runtime import AiRuntime
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
     from keeps.ui.tray import TrayIcon
@@ -155,9 +156,14 @@ def _run_daemon(show_immediately: bool) -> int:
     settings = config.open_settings()
     store = Store(_default_db_path(), max_items=int(config.get(settings, "general/max_items")))
     watcher = _make_watcher(store, float(config.get(settings, "general/max_item_mb")))
-    watcher.start()
 
-    popup = PopupWindow(store)
+    ai_runtime = AiRuntime(store, settings)
+    watcher.clip_added.connect(ai_runtime.on_clip_captured)
+    watcher.start()
+    if ai_runtime.ocr_enabled:
+        ai_runtime.run_ocr_backlog_sweep()
+
+    popup = PopupWindow(store, ai_runtime)
 
     socket_path = _socket_path()
     QLocalServer.removeServer(socket_path)  # drop a stale socket from a crashed instance
@@ -200,7 +206,7 @@ def _run_daemon(show_immediately: bool) -> int:
     tray.capture_paused_changed.connect(on_capture_paused_changed)
 
     def on_settings_requested() -> None:
-        SettingsDialog().exec()
+        SettingsDialog(ai_runtime).exec()
 
     tray.settings_requested.connect(on_settings_requested)
 

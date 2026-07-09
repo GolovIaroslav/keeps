@@ -14,6 +14,7 @@ ai = [
     "onnxruntime",
     "tokenizers",
     "numpy",
+    "opencv-python-headless",
 ]
 
 [project.scripts]

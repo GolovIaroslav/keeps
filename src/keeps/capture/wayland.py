@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from PySide6.QtCore import QObject, QProcess
+from PySide6.QtCore import QObject, QProcess, Signal
 
 from keeps import config
 from keeps.capture.base import DEFAULT_MAX_ITEM_MB, SelfSetGuard, build_bundle, should_store
@@ -21,6 +21,10 @@ _WATCH_ARGS = ["--watch", "sh", "-c", "cat >/dev/null; echo T"]
 
 
 class WaylandWatcher(QObject):
+    # Emitted right after a clip is inserted/touched -- the only clean hook
+    # for post-capture processing (OCR scheduling) without polling.
+    clip_added = Signal(int, str)  # (clip_id, kind)
+
     def __init__(
         self,
         store: Store,
@@ -59,7 +63,8 @@ class WaylandWatcher(QObject):
         kind, mime_data = result
         if not self._should_store(kind):
             return
-        self._store.add(kind, mime_data)
+        clip_id = self._store.add(kind, mime_data)
+        self.clip_added.emit(clip_id, kind)
 
     @staticmethod
     def _should_store(kind: str) -> bool:

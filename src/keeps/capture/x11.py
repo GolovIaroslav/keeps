@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Signal
 from PySide6.QtGui import QClipboard, QGuiApplication, QImage
 
 from keeps import config
@@ -20,6 +20,10 @@ from keeps.store import Store
 
 
 class X11Watcher(QObject):
+    # Emitted right after a clip is inserted/touched -- the only clean hook
+    # for post-capture processing (OCR scheduling) without polling.
+    clip_added = Signal(int, str)  # (clip_id, kind)
+
     def __init__(
         self,
         store: Store,
@@ -52,7 +56,8 @@ class X11Watcher(QObject):
         kind, mime_data = result
         if not self._should_store(kind):
             return
-        self._store.add(kind, mime_data)
+        clip_id = self._store.add(kind, mime_data)
+        self.clip_added.emit(clip_id, kind)
 
     @staticmethod
     def _should_store(kind: str) -> bool:
