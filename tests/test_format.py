@@ -1,6 +1,6 @@
 import pytest
 
-from keeps.ui.delegate import relative_time
+from keeps.ui.format import relative_time
 
 NOW = 1_000_000_000_000  # arbitrary fixed "now" in unix ms
 

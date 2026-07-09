@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QFontMetrics, QImage, QPixmap
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from keeps.store import Store
+from keeps.ui.format import relative_time
 
 KIND_LABELS = {"text": "TXT", "html": "HTML", "image": "IMG", "files": "FILES"}
 
@@ -17,22 +17,6 @@ THUMBNAIL_SIZE = 40
 MAX_PREVIEW_LINES = 3
 PADDING = 6
 NUMBER_BADGE_COUNT = 9  # matches Ctrl+1..9
-
-
-def relative_time(timestamp_ms: int, now_ms: int) -> str:
-    """Human-readable age, e.g. 'just now', '5m ago', '2h ago', or a date."""
-    delta_s = max(0, (now_ms - timestamp_ms) // 1000)
-    if delta_s < 5:
-        return "just now"
-    if delta_s < 60:
-        return f"{delta_s}s ago"
-    if delta_s < 3600:
-        return f"{delta_s // 60}m ago"
-    if delta_s < 86400:
-        return f"{delta_s // 3600}h ago"
-    if delta_s < 7 * 86400:
-        return f"{delta_s // 86400}d ago"
-    return datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d")
 
 
 class ClipItemDelegate(QStyledItemDelegate):
