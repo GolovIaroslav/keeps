@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.python-version
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+
+# Local junk
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# Local-only planning docs (not published)
+CLAUDE.md
+PLAN.md
