@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from keeps.paste import inject_paste, notify_paste_unavailable, paste_command, session_backend
@@ -55,6 +57,24 @@ def test_inject_paste_runs_command_and_returns_true():
 def test_inject_paste_process_failure_returns_false():
     def runner(command, **kwargs):
         raise OSError("boom")
+
+    result = inject_paste("x11", which=lambda tool: "/usr/bin/xdotool", runner=runner)
+    assert result is False
+
+
+def test_inject_paste_passes_a_timeout_to_the_runner():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(kwargs)
+
+    inject_paste("x11", which=lambda tool: "/usr/bin/xdotool", runner=runner)
+    assert calls[0]["timeout"] > 0
+
+
+def test_inject_paste_hung_process_returns_false_instead_of_blocking_forever():
+    def runner(command, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs["timeout"])
 
     result = inject_paste("x11", which=lambda tool: "/usr/bin/xdotool", runner=runner)
     assert result is False

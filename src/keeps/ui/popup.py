@@ -16,8 +16,10 @@ from PySide6.QtCore import (
     QMimeData,
     QModelIndex,
     QObject,
+    QRunnable,
     QSize,
     Qt,
+    QThreadPool,
     QTimer,
     QUrl,
     Signal,
@@ -120,6 +122,27 @@ class ClipListModel(QAbstractListModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return self._clips[index.row()].preview
         return None
+
+
+class _PasteInjectionTask(QRunnable):
+    """Runs ydotool/xdotool off the main thread.
+
+    A hung ydotoold call used to block Qt's event loop indefinitely inside
+    subprocess.run() on the main thread -- and since Keeps still owned the
+    system clipboard selection at that point, every other app's paste (a
+    synchronous handshake with the clipboard owner) froze right along with
+    it. paste.inject_paste() also gained its own timeout (paste.py) as
+    defense in depth, but running it here means a hang can no longer take
+    the whole app (and clipboard) down with it.
+    """
+
+    def __init__(self, backend: str) -> None:
+        super().__init__()
+        self._backend = backend
+
+    def run(self) -> None:
+        if not paste.inject_paste(self._backend, shutil.which, subprocess.run):
+            paste.notify_paste_unavailable(self._backend, shutil.which)
 
 
 class PopupWindow(QWidget):
@@ -342,9 +365,9 @@ class PopupWindow(QWidget):
         backend = paste.session_backend()
         QTimer.singleShot(delay_ms, lambda: self._run_paste_injection(backend))
 
-    def _run_paste_injection(self, backend: str) -> None:
-        if not paste.inject_paste(backend, shutil.which, subprocess.run):
-            paste.notify_paste_unavailable(backend, shutil.which)
+    @staticmethod
+    def _run_paste_injection(backend: str) -> None:
+        QThreadPool.globalInstance().start(_PasteInjectionTask(backend))
 
     def _delete_current(self) -> None:
         row = self._current_row()

@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 # errors with "Unknown command"; this raw press/release sequence works).
 YDOTOOL_CTRL_V = ["29:1", "47:1", "47:0", "29:0"]
 
+# Defense in depth: inject_paste() runs off the Qt main thread (see
+# ui/popup.py::_PasteInjectionTask), but a hung ydotool/ydotoold would still
+# leak a zombie-ish subprocess forever without this. Observed live: a stuck
+# ydotoold call blocked the injection call indefinitely, and since Keeps
+# still owned the system clipboard selection, every other app's paste (a
+# synchronous clipboard-owner handshake) hung right along with it.
+PASTE_INJECT_TIMEOUT_SECONDS = 3
+
 
 def session_backend(env: dict[str, str] | None = None) -> str:
     """'wayland' or 'x11', based on XDG_SESSION_TYPE (env is injectable for tests)."""
@@ -44,8 +52,8 @@ def inject_paste(
         logger.warning("paste: no injection tool found for backend=%s", backend)
         return False
     try:
-        runner(command, check=True, capture_output=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
+        runner(command, check=True, capture_output=True, timeout=PASTE_INJECT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         logger.warning("paste: injection failed: %s", exc)
         return False
     return True
