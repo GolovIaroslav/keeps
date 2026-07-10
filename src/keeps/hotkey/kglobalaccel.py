@@ -30,7 +30,12 @@ SERVICE = "org.kde.kglobalaccel"
 PATH = "/kglobalaccel"
 INTERFACE = "org.kde.KGlobalAccel"
 COMPONENT_INTERFACE = "org.kde.kglobalaccel.Component"
-NO_AUTOLOADING = 4  # KGlobalAccel::NoAutoloading, see KF6/KGlobalAccel/kglobalaccel.h
+# KGlobalAccelD::SetShortcutFlags (kglobalacceld.h). SetPresent is what makes
+# the daemon mark the shortcut "present" -> active -> actually grabbed by KWin;
+# without it the key lands in kglobalshortcutsrc and the KCM but never fires
+# (component stays isActive=false, verified live against kglobalacceld 6.7.2).
+SET_PRESENT = 2
+NO_AUTOLOADING = 4
 
 COMPONENT_UNIQUE = "keeps"
 COMPONENT_FRIENDLY = "Keeps"
@@ -53,7 +58,7 @@ def _set_shortcut_via_busctl(key_int: int) -> bool:
         *ACTION_ID,
         "1",
         str(key_int),
-        str(NO_AUTOLOADING),
+        str(SET_PRESENT | NO_AUTOLOADING),
     ]
     try:
         subprocess.run(command, check=True, capture_output=True)
@@ -114,9 +119,11 @@ class KGlobalAccelHotkey(QObject):
         return True
 
     def unregister(self) -> None:
+        # setInactive releases the grab but keeps the binding in
+        # kglobalshortcutsrc; unRegister would erase the user's custom key.
         kglobalaccel = QDBusInterface(SERVICE, PATH, INTERFACE, QDBusConnection.sessionBus())
         if kglobalaccel.isValid():
-            kglobalaccel.call("unRegister", ACTION_ID)
+            kglobalaccel.call("setInactive", ACTION_ID)
 
     @Slot(str, str, "qlonglong")
     def _on_pressed(self, component: str, action: str, _timestamp: int) -> None:
