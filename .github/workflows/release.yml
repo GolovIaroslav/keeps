@@ -30,14 +30,22 @@ jobs:
           PYROOT="$(dirname "$(dirname "$(uv python find 3.12)")")"
           APPDIR="$PWD/AppDir"
           mkdir -p "$APPDIR/usr"
-          cp -a "$PYROOT" "$APPDIR/usr/python312"
 
-          # Installs into the copied interpreter's own site-packages (not a venv,
-          # which would symlink back to $PYROOT and break once $PYROOT is gone) --
-          # this keeps the AppDir fully self-contained and relocatable, verified
-          # locally by moving the tree and re-running `python -m keeps` from the
-          # new path before writing this workflow.
+          # -L dereferences symlinks so the copy is fully self-contained --
+          # a plain `cp -a` was observed (in CI, not locally) to leave the
+          # copied interpreter still resolving scripts/site-packages back to
+          # $PYROOT's original path, which is gone once this step ends.
+          cp -aL "$PYROOT" "$APPDIR/usr/python312"
+
+          # Fail loudly here instead of silently shipping an empty AppImage
+          # if the copy isn't actually self-contained (this is exactly the
+          # bug this assertion caught in the first real CI run).
+          "$APPDIR/usr/python312/bin/python3.12" -c "import sys; assert sys.prefix.startswith('$APPDIR'), f'sys.prefix={sys.prefix!r} escaped the AppDir'; print('interpreter self-contained, sys.prefix =', sys.prefix)"
+
           "$APPDIR/usr/python312/bin/python3.12" -m pip install --break-system-packages --no-input ".[ai]"
+
+          "$APPDIR/usr/python312/bin/python3.12" -c "import keeps, PySide6, onnxruntime, cv2, numpy, tokenizers; print('all deps import fine from the AppDir copy')"
+          du -sh "$APPDIR"
 
           printf '%s\n' \
             '#!/bin/sh' \
