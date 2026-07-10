@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-DESKTOP_ENTRY = """\
+from keeps.desktop_entry import launch_command
+
+DESKTOP_ENTRY_TEMPLATE = """\
 [Desktop Entry]
 Type=Application
 Name=Keeps
 Comment=Clipboard manager
-Exec=keeps
+Exec={exec_command}
 Icon=edit-paste
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
@@ -30,6 +32,6 @@ def set_autostart_enabled(enabled: bool, config_home: Path | None = None) -> Non
     path = autostart_path(config_home)
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(DESKTOP_ENTRY)
+        path.write_text(DESKTOP_ENTRY_TEMPLATE.format(exec_command=launch_command()))
     else:
         path.unlink(missing_ok=True)
