@@ -152,6 +152,11 @@ def _run_daemon(show_immediately: bool) -> int:
     qt_app = QApplication(sys.argv)
     qt_app.setDesktopFileName("keeps")  # associates KGlobalAccel/tray with our .desktop entry
     qt_app.setQuitOnLastWindowClosed(False)  # popup/settings hide, they don't end the daemon
+    # One journal line to diagnose the login-autostart race: a daemon started
+    # before the compositor advertises outputs sees only a placeholder screen
+    # (see PopupWindow._drop_stale_surface).
+    screen_names = [screen.name() or "<unnamed>" for screen in qt_app.screens()]
+    print(f"keeps: screens at startup: {screen_names}", file=sys.stderr)
 
     settings = config.open_settings()
     store = Store(_default_db_path(), max_items=int(config.get(settings, "general/max_items")))

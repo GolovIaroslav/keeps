@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from PySide6.QtCore import (
@@ -194,6 +195,7 @@ class PopupWindow(QWidget):
         self._update_mode_badge()
         self.refresh()
         self._select_row(0)
+        self._drop_stale_surface()
         self.show()
         self.raise_()
         self.activateWindow()
@@ -204,6 +206,25 @@ class PopupWindow(QWidget):
             self.hide()
         else:
             self.show_popup()
+
+    def _drop_stale_surface(self) -> None:
+        """Discard a native window bound to a screen that no longer exists.
+
+        A daemon autostarted in the first seconds of a Plasma Wayland session
+        can see only Qt's placeholder screen; a window created against it is
+        never mapped by the compositor and show() then fails silently forever
+        (QTBUG-98010 family). Destroying the native window makes show()
+        recreate the surface on the real, current screen. No-op normally.
+        """
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        if handle.screen() not in QGuiApplication.screens():
+            print(
+                "keeps: popup window was bound to a dead screen; recreating surface",
+                file=sys.stderr,
+            )
+            self.destroy()
 
     def hideEvent(self, event) -> None:
         self._settings.setValue("popup/size", self.size())
