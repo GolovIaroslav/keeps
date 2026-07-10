@@ -45,6 +45,12 @@ class X11Watcher(QObject):
         self._clipboard.dataChanged.disconnect(self._on_changed)
 
     def _on_changed(self) -> None:
+        # Our own clipboard write (popup paste/copy) also fires dataChanged;
+        # the clip is already in the store, nothing to capture. (No deadlock
+        # risk here, unlike Wayland -- QClipboard reads in-process -- just a
+        # pointless re-capture of our own data.)
+        if self._clipboard.ownsClipboard():
+            return
         if self.guard.consume_skip():
             return
         self._mime_data = self._clipboard.mimeData()

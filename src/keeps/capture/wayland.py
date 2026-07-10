@@ -6,6 +6,7 @@ import logging
 import subprocess
 
 from PySide6.QtCore import QObject, QProcess, Signal
+from PySide6.QtGui import QGuiApplication
 
 from keeps import config
 from keeps.capture.base import DEFAULT_MAX_ITEM_MB, SelfSetGuard, build_bundle, should_store
@@ -18,6 +19,13 @@ logger = logging.getLogger(__name__)
 # echoed byte is our only signal — the actual mime types are re-read via a
 # separate `wl-paste --list-types` call, since --watch does not report them.
 _WATCH_ARGS = ["--watch", "sh", "-c", "cat >/dev/null; echo T"]
+
+# On Wayland the clipboard owner serves content on demand: `wl-paste` blocks
+# until the owning client writes the data. If that owner is hung -- or is
+# *this very process* (see _on_triggered) -- an untimed read would block the
+# Qt main loop forever, and with it every other app's paste (they all wait on
+# the same owner). Observed live 2026-07-10 as a system-wide clipboard freeze.
+WL_PASTE_TIMEOUT_SECONDS = 3
 
 
 class WaylandWatcher(QObject):
@@ -49,6 +57,13 @@ class WaylandWatcher(QObject):
 
     def _on_triggered(self) -> None:
         self._process.readAllStandardOutput()
+        # Our own clipboard write (popup paste/copy) also fires --watch. Reading
+        # it back would deadlock: wl-paste asks the owner (us) for the data, but
+        # the owner's main thread is the one blocked inside that very wl-paste
+        # call. The clip is already in the store (touch()ed on activation), so
+        # there is nothing to capture anyway.
+        if QGuiApplication.clipboard().ownsClipboard():
+            return
         if self.guard.consume_skip():
             return
         self._capture()
@@ -57,7 +72,11 @@ class WaylandWatcher(QObject):
         available = self._list_types()
         if available is None:
             return
-        result = build_bundle(available, self._read_mime, self._max_item_mb)
+        try:
+            result = build_bundle(available, self._read_mime, self._max_item_mb)
+        except subprocess.TimeoutExpired:
+            logger.warning("wl-paste read timed out; clipboard owner unresponsive, skipping clip")
+            return
         if result is None:
             return
         kind, mime_data = result
@@ -78,9 +97,17 @@ class WaylandWatcher(QObject):
 
     @staticmethod
     def _list_types() -> set[str] | None:
-        proc = subprocess.run(
-            ["wl-paste", "--list-types"], capture_output=True, text=True, check=False
-        )
+        try:
+            proc = subprocess.run(
+                ["wl-paste", "--list-types"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=WL_PASTE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("wl-paste --list-types timed out, skipping clip")
+            return None
         if proc.returncode != 0:
             logger.debug("wl-paste --list-types failed: %s", proc.stderr.strip())
             return None
@@ -88,7 +115,11 @@ class WaylandWatcher(QObject):
 
     @staticmethod
     def _read_mime(mime: str) -> bytes:
+        # TimeoutExpired propagates to _capture, which aborts the whole bundle.
         proc = subprocess.run(
-            ["wl-paste", "-n", "--type", mime], capture_output=True, check=False
+            ["wl-paste", "-n", "--type", mime],
+            capture_output=True,
+            check=False,
+            timeout=WL_PASTE_TIMEOUT_SECONDS,
         )
         return proc.stdout

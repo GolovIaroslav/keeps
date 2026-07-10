@@ -21,10 +21,7 @@ YDOTOOL_CTRL_V = ["29:1", "47:1", "47:0", "29:0"]
 
 # Defense in depth: inject_paste() runs off the Qt main thread (see
 # ui/popup.py::_PasteInjectionTask), but a hung ydotool/ydotoold would still
-# leak a zombie-ish subprocess forever without this. Observed live: a stuck
-# ydotoold call blocked the injection call indefinitely, and since Keeps
-# still owned the system clipboard selection, every other app's paste (a
-# synchronous clipboard-owner handshake) hung right along with it.
+# leak a stuck subprocess forever without this.
 PASTE_INJECT_TIMEOUT_SECONDS = 3
 
 

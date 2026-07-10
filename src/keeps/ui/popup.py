@@ -127,13 +127,10 @@ class ClipListModel(QAbstractListModel):
 class _PasteInjectionTask(QRunnable):
     """Runs ydotool/xdotool off the main thread.
 
-    A hung ydotoold call used to block Qt's event loop indefinitely inside
-    subprocess.run() on the main thread -- and since Keeps still owned the
-    system clipboard selection at that point, every other app's paste (a
-    synchronous handshake with the clipboard owner) froze right along with
-    it. paste.inject_paste() also gained its own timeout (paste.py) as
-    defense in depth, but running it here means a hang can no longer take
-    the whole app (and clipboard) down with it.
+    The main thread owns the clipboard right after _set_clipboard, so it must
+    stay responsive to serve paste requests from other apps -- a subprocess
+    hang here (ydotoold under load, PLAN.md §11) must never block it.
+    paste.inject_paste() also carries its own timeout as defense in depth.
     """
 
     def __init__(self, backend: str) -> None:
