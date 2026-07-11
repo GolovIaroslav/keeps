@@ -24,7 +24,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent
+from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -39,10 +39,35 @@ from keeps import config, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.store import Clip, Store
+from keeps.ui import geometry
 from keeps.ui.delegate import ClipItemDelegate
 
 SEARCH_DEBOUNCE_MS = 50
 DEFAULT_SIZE = QSize(420, 480)
+
+# Frameless windows have no native resize grip; this is both the hit-test
+# margin for drag-resize (mousePressEvent/mouseMoveEvent below) and the
+# layout's content margin, so that ring always belongs to the window itself
+# rather than a child widget (search_edit/list_view) swallowing the event.
+_RESIZE_MARGIN = geometry.RESIZE_MARGIN
+
+_EDGE_TO_QT = {
+    "left": Qt.Edge.LeftEdge,
+    "right": Qt.Edge.RightEdge,
+    "top": Qt.Edge.TopEdge,
+    "bottom": Qt.Edge.BottomEdge,
+}
+
+_EDGE_CURSORS = {
+    frozenset({"left"}): Qt.CursorShape.SizeHorCursor,
+    frozenset({"right"}): Qt.CursorShape.SizeHorCursor,
+    frozenset({"top"}): Qt.CursorShape.SizeVerCursor,
+    frozenset({"bottom"}): Qt.CursorShape.SizeVerCursor,
+    frozenset({"top", "left"}): Qt.CursorShape.SizeFDiagCursor,
+    frozenset({"bottom", "right"}): Qt.CursorShape.SizeFDiagCursor,
+    frozenset({"top", "right"}): Qt.CursorShape.SizeBDiagCursor,
+    frozenset({"bottom", "left"}): Qt.CursorShape.SizeBDiagCursor,
+}
 
 # Ctrl+E scope decision (Ф3): only plain "text" clips are editable in an
 # external editor for now — editing html/image/files has no clean semantics
@@ -162,6 +187,7 @@ class PopupWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint,
         )
+        self.setMouseTracking(True)  # hover cursor feedback near the resize margin
         self.store = store
         self._ai_runtime = ai_runtime
         self.model = ClipListModel(store, ai_runtime)
@@ -178,17 +204,23 @@ class PopupWindow(QWidget):
 
         self.list_view = QListView(self)
         self.list_view.setModel(self.model)
-        self.list_view.setItemDelegate(ClipItemDelegate(store, self.list_view))
+        self._delegate = ClipItemDelegate(store, self.list_view)
+        self.list_view.setItemDelegate(self._delegate)
         self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.doubleClicked.connect(self._on_double_clicked)
+        # Wheel events over the list land on its viewport, not list_view itself
+        # (QAbstractScrollArea plumbing) -- filter there for Ctrl+wheel scaling.
+        self.list_view.viewport().installEventFilter(self)
 
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
         search_row.addWidget(self._mode_badge)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        # Matches _RESIZE_MARGIN so the drag-resize hit-test ring is never
+        # covered by a child widget (search_edit/list_view).
+        layout.setContentsMargins(*([_RESIZE_MARGIN] * 4))
         layout.addLayout(search_row)
         layout.addWidget(self.list_view)
 
@@ -205,6 +237,13 @@ class PopupWindow(QWidget):
         self._settings = config.open_settings()
         size = self._settings.value("popup/size")
         self.resize(size if size is not None else DEFAULT_SIZE)
+
+        # Ctrl+scroll / Ctrl+Plus / Ctrl+Minus (§6): scales the whole popup UI
+        # (font + delegate thumbnail/padding), not just text, and is
+        # remembered across sessions the same way popup/size is.
+        self._base_point_size = self.font().pointSizeF()
+        self._ui_scale = float(self._settings.value("popup/ui_scale", 1.0))
+        self._apply_ui_scale()
 
         self.paste_requested.connect(self._schedule_paste_injection)
 
@@ -273,6 +312,8 @@ class PopupWindow(QWidget):
     # -- keymap (PLAN.md §6), paste injection itself is Ф4 -----------------
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Wheel and self._handle_wheel(event):
+            return True
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
         return super().eventFilter(obj, event)
@@ -310,6 +351,12 @@ class PopupWindow(QWidget):
             return True
         if ctrl and key == Qt.Key.Key_M:
             self._cycle_search_mode()
+            return True
+        if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._set_ui_scale(geometry.next_ui_scale(self._ui_scale, 1))
+            return True
+        if ctrl and key == Qt.Key.Key_Minus:
+            self._set_ui_scale(geometry.next_ui_scale(self._ui_scale, -1))
             return True
         if ctrl and Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             row = key - Qt.Key.Key_1
@@ -387,6 +434,57 @@ class PopupWindow(QWidget):
         self._mode_badge.setVisible(rag_on)
         if rag_on:
             self._mode_badge.setText(f"[{_MODE_BADGE_LABELS[self._ai_runtime.search_mode]}]")
+
+    # -- UI scale (Ctrl+scroll / Ctrl+Plus / Ctrl+Minus, §6) ----------------
+
+    def _handle_wheel(self, event: QWheelEvent) -> bool:
+        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            return False
+        direction = 1 if event.angleDelta().y() > 0 else -1
+        self._set_ui_scale(geometry.next_ui_scale(self._ui_scale, direction))
+        return True
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if not self._handle_wheel(event):
+            super().wheelEvent(event)
+
+    def _set_ui_scale(self, scale: float) -> None:
+        if scale == self._ui_scale:
+            return
+        self._ui_scale = scale
+        self._apply_ui_scale()
+
+    def _apply_ui_scale(self) -> None:
+        font = self.font()
+        font.setPointSizeF(self._base_point_size * self._ui_scale)
+        self.setFont(font)
+        self._delegate.set_scale(self._ui_scale)
+        self.list_view.doItemsLayout()
+        self._settings.setValue("popup/ui_scale", self._ui_scale)
+
+    # -- drag-resize by any edge/corner (frameless window has no native grip)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = event.position().toPoint()
+        edges = geometry.resize_edges(pos.x(), pos.y(), self.width(), self.height())
+        if edges:
+            self.setCursor(_EDGE_CURSORS[edges])
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.windowHandle() is not None:
+            pos = event.position().toPoint()
+            edges = geometry.resize_edges(pos.x(), pos.y(), self.width(), self.height())
+            if edges:
+                qt_edges = Qt.Edge(0)
+                for name in edges:
+                    qt_edges |= _EDGE_TO_QT[name]
+                if self.windowHandle().startSystemResize(qt_edges):
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
 
     def _toggle_pin_current(self) -> None:
         row = self._current_row()

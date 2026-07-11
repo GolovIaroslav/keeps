@@ -23,12 +23,23 @@ class ClipItemDelegate(QStyledItemDelegate):
     def __init__(self, store: Store, parent=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._scale = 1.0
+
+    def set_scale(self, scale: float) -> None:
+        """Scale thumbnail/padding pixel sizes to match the UI scale (Ctrl+scroll)."""
+        self._scale = scale
+
+    def _thumbnail_size(self) -> int:
+        return round(THUMBNAIL_SIZE * self._scale)
+
+    def _padding(self) -> int:
+        return round(PADDING * self._scale)
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         metrics = QFontMetrics(option.font)
         line_height = metrics.lineSpacing()
         text_block = line_height * (1 + MAX_PREVIEW_LINES)
-        height = max(THUMBNAIL_SIZE, text_block) + 2 * PADDING
+        height = max(self._thumbnail_size(), text_block) + 2 * self._padding()
         return QSize(option.rect.width(), height)
 
     def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
@@ -42,7 +53,8 @@ class ClipItemDelegate(QStyledItemDelegate):
             text_color = option.palette.text().color()
         painter.setPen(text_color)
 
-        rect = option.rect.adjusted(PADDING, PADDING, -PADDING, -PADDING)
+        padding = self._padding()
+        rect = option.rect.adjusted(padding, padding, -padding, -padding)
         metrics = QFontMetrics(option.font)
         line_height = metrics.lineSpacing()
 
@@ -55,17 +67,18 @@ class ClipItemDelegate(QStyledItemDelegate):
             rect.setLeft(rect.left() + 18)
 
         if clip.kind == "image":
+            thumbnail_size = self._thumbnail_size()
             png = self._store.get_data(clip.id).get("image/png")
             image = QImage.fromData(png, "PNG") if png else QImage()
             if not image.isNull():
                 pixmap = QPixmap.fromImage(image).scaled(
-                    THUMBNAIL_SIZE,
-                    THUMBNAIL_SIZE,
+                    thumbnail_size,
+                    thumbnail_size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 painter.drawPixmap(rect.left(), rect.top(), pixmap)
-            rect.setLeft(rect.left() + THUMBNAIL_SIZE + PADDING)
+            rect.setLeft(rect.left() + thumbnail_size + padding)
 
         if clip.pinned:
             painter.setBrush(text_color)
