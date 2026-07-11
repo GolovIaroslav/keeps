@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -39,7 +40,7 @@ from keeps import config, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.store import Clip, Store
-from keeps.ui import geometry
+from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
 
 SEARCH_DEBOUNCE_MS = 50
@@ -229,6 +230,8 @@ class PopupWindow(QWidget):
         self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.doubleClicked.connect(self._on_double_clicked)
+        self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_view.customContextMenuRequested.connect(self._show_context_menu)
         # Wheel events over the list land on its viewport, not list_view itself
         # (QAbstractScrollArea plumbing) -- filter there for Ctrl+wheel scaling.
         self.list_view.viewport().installEventFilter(self)
@@ -390,6 +393,61 @@ class PopupWindow(QWidget):
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
         self._activate(index.row(), plain_only=False, want_paste=True)
+
+    # -- context menu (PLAN.md §6: "duplicates paste/paste as text/copy/pin/
+    # edit/delete") + Special Paste submenu (Ф9.1, menu-only, no shortcut) ---
+
+    def _show_context_menu(self, pos) -> None:
+        index = self.list_view.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        self._select_row(row)  # right-click on a non-selected row selects it first
+        clip = self.model.clip_at(row)
+
+        menu = QMenu(self.list_view)
+        menu.addAction(
+            self.tr("Paste"), lambda: self._activate(row, plain_only=False, want_paste=True)
+        )
+        menu.addAction(
+            self.tr("Paste as text"),
+            lambda: self._activate(row, plain_only=True, want_paste=True),
+        )
+        menu.addAction(
+            self.tr("Copy"), lambda: self._activate(row, plain_only=False, want_paste=False)
+        )
+        menu.addSeparator()
+        pin_label = self.tr("Unpin") if clip.pinned else self.tr("Pin")
+        menu.addAction(pin_label, self._toggle_pin_current)
+        edit_action = menu.addAction(self.tr("Edit"), self._edit_current)
+        edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
+        menu.addAction(self.tr("Delete"), self._delete_current)
+
+        plain_text = self.store.get_data(clip.id).get("text/plain")
+        if plain_text:
+            menu.addSeparator()
+            special_menu = menu.addMenu(self.tr("Special Paste"))
+            for label, transform in text_transform.TRANSFORMS.items():
+                special_menu.addAction(label, lambda t=transform: self._special_paste(row, t))
+
+        menu.exec(self.list_view.viewport().mapToGlobal(pos))
+
+    def _special_paste(self, row: int, transform) -> None:
+        """Paste a transformed copy of a clip's plain text without touching storage.
+
+        Ditto-style Special Paste: the transform only affects what lands on
+        the clipboard/target app, never the stored clip (no update_content
+        call), same as the source clip content shown in the list afterwards.
+        """
+        clip = self.model.clip_at(row)
+        plain = self.store.get_data(clip.id).get("text/plain", b"").decode(
+            "utf-8", errors="replace"
+        )
+        transformed = transform(plain)
+        self._set_clipboard({"text/plain": transformed.encode("utf-8")}, plain_only=True)
+        self.store.touch(clip.id)
+        self.hide()
+        self.paste_requested.emit(clip.id, True)
 
     # -- actions -------------------------------------------------------------
 
