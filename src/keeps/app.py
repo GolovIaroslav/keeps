@@ -167,6 +167,8 @@ def _run_daemon(show_immediately: bool) -> int:
     watcher.start()
     if ai_runtime.ocr_enabled:
         ai_runtime.run_ocr_backlog_sweep()
+    if ai_runtime.rag_text_enabled:
+        ai_runtime.run_text_embed_backlog_sweep()
 
     popup = PopupWindow(store, ai_runtime)
 

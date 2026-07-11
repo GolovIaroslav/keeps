@@ -24,7 +24,14 @@ OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facin
 
 
 class _QuerySignals(QObject):
-    finished = Signal(str, dict)  # (query, {clip_id: cosine_score})
+    # `object`, not `dict`: PySide6 marshals a `dict`-typed signal argument as
+    # a C++ QVariantMap (string keys only) for the queued cross-thread
+    # connection this needs (worker thread -> main thread) -- with our
+    # int-keyed {clip_id: score} dict, that conversion silently fails and the
+    # receiver gets an empty dict every time. `object` carries the raw Python
+    # dict through untouched. Found live: RAG search always returned zero
+    # semantic hits despite embeddings existing on disk.
+    finished = Signal(str, object)  # (query, {clip_id: cosine_score})
 
 
 class _EncodeQueryTask(QRunnable):
@@ -50,6 +57,28 @@ class _EncodeQueryTask(QRunnable):
             vec = np.frombuffer(vec_bytes, dtype=np.float32)
             scores[clip_id] = float(np.dot(query_vec, vec))
         self._signals.finished.emit(self._query, scores)
+
+
+class _TextEmbedSignals(QObject):
+    finished = Signal(int, bytes)  # (clip_id, embedding_bytes)
+
+
+class _TextEmbedTask(QRunnable):
+    """Runs off the main thread: embeds a captured text/html clip's own
+    content, so it can be found by RAG search later. Mirrors `_OcrTask`'s
+    embed step, but for clips that never go through OCR.
+    """
+
+    def __init__(self, embed_fn, clip_id: int, text: str, signals: _TextEmbedSignals) -> None:
+        super().__init__()
+        self._embed_fn = embed_fn
+        self._clip_id = clip_id
+        self._text = text
+        self._signals = signals
+
+    def run(self) -> None:
+        vec_bytes = self._embed_fn(self._text)
+        self._signals.finished.emit(self._clip_id, vec_bytes)
 
 
 class _OcrSignals(QObject):
@@ -236,6 +265,11 @@ class AiRuntime(QObject):
 
     def on_clip_captured(self, clip_id: int, kind: str) -> None:
         """Connected to each capture watcher's `clip_added` signal."""
+        if kind in ("text", "html") and self.rag_text_enabled:
+            # No timing knob here (unlike OCR, §9.2): encode() is ~13ms warm
+            # (PLAN.md §9 live smoke test), so always indexing immediately
+            # needs no debounce/schedule setting of its own.
+            self._process_clip_text_embed(clip_id)
         if kind != "image" or not self.ocr_enabled:
             return
         timing = self.ocr_timing
@@ -245,6 +279,28 @@ class AiRuntime(QObject):
             self._pending_delayed_clip_ids.add(clip_id)
             self._delay_timer.start(int(self.ocr_delay_seconds * 1000))
         # "scheduled": nothing to do here -- the periodic sweep picks it up.
+
+    def _process_clip_text_embed(self, clip_id: int) -> None:
+        mime_data = self._store.get_data(clip_id)
+        text = mime_data.get("text/plain", b"").decode("utf-8", errors="replace")
+        if not text.strip():
+            return
+        signals = _TextEmbedSignals(self)
+        signals.finished.connect(self._on_text_embed_done)
+        task = _TextEmbedTask(self.embed_text, clip_id, text, signals)
+        QThreadPool.globalInstance().start(task, OCR_TASK_PRIORITY)
+
+    def _on_text_embed_done(self, clip_id: int, vec_bytes: bytes) -> None:
+        self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+
+    def run_text_embed_backlog_sweep(self) -> None:
+        """Picks up every text/html clip still missing an embedding -- the
+        one-time pass over pre-existing history on first enabling RAG.
+        """
+        if not self.rag_text_enabled:
+            return
+        for clip_id in self._store.clips_missing_embedding(models.TEXT_EMBED.name):
+            self._process_clip_text_embed(clip_id)
 
     def _flush_delayed_ocr(self) -> None:
         pending, self._pending_delayed_clip_ids = self._pending_delayed_clip_ids, set()

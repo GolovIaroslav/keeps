@@ -260,6 +260,16 @@ class Store:
         ).fetchall()
         return [row["id"] for row in rows]
 
+    def clips_missing_embedding(self, model: str) -> list[int]:
+        """Text/html clip ids with no `model` embedding yet -- text-RAG backlog sweep."""
+        rows = self._conn.execute(
+            "SELECT c.id FROM clips c "
+            "LEFT JOIN embeddings e ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.kind IN ('text', 'html') AND e.clip_id IS NULL",
+            (model,),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> Clip:
         return Clip(

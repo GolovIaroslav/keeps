@@ -206,6 +206,15 @@ def test_clips_missing_ocr_lists_only_image_clips_without_ocr_text(store):
     assert store.clips_missing_ocr() == [without_ocr]
 
 
+def test_clips_missing_embedding_lists_only_text_and_html_without_it(store):
+    embedded = store.add("text", {"text/plain": b"already embedded"})
+    store.set_embedding(embedded, "model-x", b"vec")
+    not_embedded = store.add("html", {"text/plain": b"needs embedding", "text/html": b"<p>x</p>"})
+    store.add("image", {"image/png": PNG_1X1})  # never text-embedded, must be excluded
+
+    assert store.clips_missing_embedding("model-x") == [not_embedded]
+
+
 def test_add_and_search_5000_records_is_fast(tmp_path):
     store = Store(tmp_path / "keeps.db", max_items=10_000)
     start = time.perf_counter()

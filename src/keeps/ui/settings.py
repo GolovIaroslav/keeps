@@ -162,7 +162,7 @@ class SettingsDialog(QDialog):
 
         rag_box = QCheckBox()
         rag_box.setChecked(bool(config.get(self._settings, "ai/rag_text_enabled")))
-        rag_box.toggled.connect(lambda v: self._save("ai/rag_text_enabled", v))
+        rag_box.toggled.connect(self._on_rag_toggled)
         toggles.addRow(self.tr("Semantic search (RAG) over clip text"), rag_box)
 
         ocr_box = QCheckBox()
@@ -237,6 +237,11 @@ class SettingsDialog(QDialog):
         self._save("ai/ocr_enabled", checked)
         if checked and self._ai_runtime is not None:
             self._ai_runtime.run_ocr_backlog_sweep()
+
+    def _on_rag_toggled(self, checked: bool) -> None:
+        self._save("ai/rag_text_enabled", checked)
+        if checked and self._ai_runtime is not None:
+            self._ai_runtime.run_text_embed_backlog_sweep()
 
     def _build_model_section(
         self,
