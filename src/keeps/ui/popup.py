@@ -89,6 +89,24 @@ _MODE_BADGE_LABELS = {
     ranking.SearchMode.SEMANTIC: "meaning",
 }
 
+# Clicking the badge cycles modes the same way Ctrl+M does (PLAN.md §9);
+# the tooltip exists because "blended"/"keywords"/"meaning" alone read as
+# unexplained jargon otherwise (user feedback 2026-07-11).
+_MODE_BADGE_TOOLTIPS = {
+    ranking.SearchMode.BLENDED: (
+        "Auto (default): exact matches first, semantically related results "
+        "blended in below them. Click to switch mode, or Ctrl+M."
+    ),
+    ranking.SearchMode.KEYWORD: (
+        "Keywords only: exact substring matches, no semantic ranking. "
+        "Click to switch mode, or Ctrl+M."
+    ),
+    ranking.SearchMode.SEMANTIC: (
+        "Meaning only: ranked purely by semantic similarity to your query, "
+        "ignoring exact matches. Click to switch mode, or Ctrl+M."
+    ),
+}
+
 
 class ClipListModel(QAbstractListModel):
     def __init__(
@@ -201,6 +219,8 @@ class PopupWindow(QWidget):
         # between otherwise (PLAN.md §9).
         self._mode_badge = QLabel(self)
         self._mode_badge.setVisible(False)
+        self._mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mode_badge.installEventFilter(self)
 
         self.list_view = QListView(self)
         self.list_view.setModel(self.model)
@@ -316,6 +336,9 @@ class PopupWindow(QWidget):
             return True
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
+        if obj is self._mode_badge and event.type() == QEvent.Type.MouseButtonPress:
+            self._cycle_search_mode()
+            return True
         return super().eventFilter(obj, event)
 
     def _handle_key(self, event: QKeyEvent) -> bool:
@@ -433,7 +456,9 @@ class PopupWindow(QWidget):
         rag_on = self._ai_runtime is not None and self._ai_runtime.rag_text_enabled
         self._mode_badge.setVisible(rag_on)
         if rag_on:
-            self._mode_badge.setText(f"[{_MODE_BADGE_LABELS[self._ai_runtime.search_mode]}]")
+            mode = self._ai_runtime.search_mode
+            self._mode_badge.setText(f"[{_MODE_BADGE_LABELS[mode]}]")
+            self._mode_badge.setToolTip(_MODE_BADGE_TOOLTIPS[mode])
 
     # -- UI scale (Ctrl+scroll / Ctrl+Plus / Ctrl+Minus, §6) ----------------
 
