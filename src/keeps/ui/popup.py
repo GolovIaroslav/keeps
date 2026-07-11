@@ -42,6 +42,7 @@ from keeps.ai.runtime import AiRuntime
 from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
+from keeps.ui.expand_dialog import EditDialog, ViewDialog
 
 SEARCH_DEBOUNCE_MS = 50
 DEFAULT_SIZE = QSize(420, 480)
@@ -372,6 +373,12 @@ class PopupWindow(QWidget):
         if ctrl and key == Qt.Key.Key_E:
             self._edit_current()
             return True
+        if key == Qt.Key.Key_F3:
+            self._view_current()
+            return True
+        if key == Qt.Key.Key_F2:
+            self._edit_builtin_current()
+            return True
         if ctrl and key == Qt.Key.Key_P:
             self._toggle_pin_current()
             return True
@@ -417,9 +424,12 @@ class PopupWindow(QWidget):
             self.tr("Copy"), lambda: self._activate(row, plain_only=False, want_paste=False)
         )
         menu.addSeparator()
+        menu.addAction(self.tr("View"), self._view_current)
         pin_label = self.tr("Unpin") if clip.pinned else self.tr("Pin")
         menu.addAction(pin_label, self._toggle_pin_current)
-        edit_action = menu.addAction(self.tr("Edit"), self._edit_current)
+        builtin_edit_action = menu.addAction(self.tr("Edit"), self._edit_builtin_current)
+        builtin_edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
+        edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
         edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
         menu.addAction(self.tr("Delete"), self._delete_current)
 
@@ -577,6 +587,30 @@ class PopupWindow(QWidget):
         self.store.set_pinned(clip.id, not clip.pinned)
         self.refresh()
         self._select_row(min(row, self.model.rowCount() - 1))
+
+    def _view_current(self) -> None:
+        """F3, any kind: read-only expand (Ditto's "View Full Description")."""
+        row = self._current_row()
+        if row is None:
+            return
+        clip = self.model.clip_at(row)
+        mime_data = self.store.get_data(clip.id)
+        ViewDialog(clip, mime_data, self).exec()
+
+    def _edit_builtin_current(self) -> None:
+        """F2, text clips only: built-in modal editor (distinct from Ctrl+E/_edit_current,
+        which shells out to an external editor and is unrelated/unchanged)."""
+        row = self._current_row()
+        if row is None:
+            return
+        clip = self.model.clip_at(row)
+        if clip.kind not in EDITABLE_KINDS:
+            return
+        text = self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
+        dialog = EditDialog(text, self)
+        if dialog.exec():
+            self.store.update_content(clip.id, {"text/plain": dialog.text().encode("utf-8")})
+            self.refresh()
 
     def _edit_current(self) -> None:
         row = self._current_row()
