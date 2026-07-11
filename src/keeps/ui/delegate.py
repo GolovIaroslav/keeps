@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
-from PySide6.QtGui import QFontMetrics, QImage, QPixmap
+from PySide6.QtGui import QFontMetrics, QImage, QPen, QPixmap
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from keeps.store import Store
@@ -50,7 +50,11 @@ class ClipItemDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, option.palette.highlight())
             text_color = option.palette.highlightedText().color()
         else:
+            if index.row() % 2:
+                painter.fillRect(option.rect, option.palette.alternateBase())
             text_color = option.palette.text().color()
+        painter.setPen(QPen(option.palette.mid().color()))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
         painter.setPen(text_color)
 
         padding = self._padding()
