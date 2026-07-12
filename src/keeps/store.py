@@ -273,10 +273,11 @@ class Store:
             return clip_id
 
         preview = build_preview(kind, mime_data)
+        last_used_at = self._next_usage_timestamps(1)[0]
         cur = self._conn.execute(
             "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
             "VALUES (?, ?, ?, ?, ?, 1)",
-            (now, now, kind, preview, content_hash),
+            (now, last_used_at, kind, preview, content_hash),
         )
         clip_id = cur.lastrowid
         self._conn.executemany(
@@ -290,22 +291,31 @@ class Store:
 
     def touch(self, clip_id: int) -> None:
         """Move a clip to the top of the list (used-item invariant)."""
-        now = int(time.time() * 1000)
+        last_used_at = self._next_usage_timestamps(1)[0]
         self._conn.execute(
             "UPDATE clips SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
-            (now, clip_id),
+            (last_used_at, clip_id),
         )
         self._conn.commit()
 
     def touch_many(self, clip_ids: list[int]) -> None:
         """Move clips to the top while preserving the requested top-to-bottom order."""
         clip_ids = list(dict.fromkeys(clip_ids))
-        base = int(time.time() * 1000) + len(clip_ids)
+        timestamps = reversed(self._next_usage_timestamps(len(clip_ids)))
         self._conn.executemany(
             "UPDATE clips SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
-            [(base - position, clip_id) for position, clip_id in enumerate(clip_ids)],
+            list(zip(timestamps, clip_ids, strict=True)),
         )
         self._conn.commit()
+
+    def _next_usage_timestamps(self, count: int) -> list[int]:
+        """Reserve monotonic timestamps so every later use still becomes newest."""
+        if count <= 0:
+            return []
+        row = self._conn.execute("SELECT max(last_used_at) AS latest FROM clips").fetchone()
+        latest = row["latest"] if row is not None else None
+        first = max(int(time.time() * 1000), (latest or 0) + 1)
+        return list(range(first, first + count))
 
     def delete(self, clip_id: int) -> None:
         self._conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))

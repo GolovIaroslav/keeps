@@ -72,6 +72,27 @@ def test_touch_many_preserves_requested_top_to_bottom_order(store):
     assert [clip.id for clip in store.all()] == [first, second, third]
 
 
+def test_single_use_after_touch_many_still_moves_to_top(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    third = store.add("text", {"text/plain": b"third"})
+    store.touch_many([first, second])
+
+    store.touch(third)
+
+    assert store.all()[0].id == third
+
+
+def test_add_after_touch_many_still_puts_new_clip_on_top(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    store.touch_many([first, second])
+
+    newest = store.add("text", {"text/plain": b"newest"})
+
+    assert store.all()[0].id == newest
+
+
 def test_delete_many_removes_all_requested_clips(store):
     first = store.add("text", {"text/plain": b"first"})
     second = store.add("text", {"text/plain": b"second"})
