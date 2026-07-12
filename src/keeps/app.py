@@ -159,6 +159,7 @@ def _run_daemon(show_immediately: bool) -> int:
     print(f"keeps: screens at startup: {screen_names}", file=sys.stderr)
 
     settings = config.open_settings()
+    config.apply_theme(str(config.get(settings, "general/theme")))
     store = Store(_default_db_path(), max_items=int(config.get(settings, "general/max_items")))
     watcher = _make_watcher(store, float(config.get(settings, "general/max_item_mb")))
 

@@ -113,6 +113,12 @@ class SettingsDialog(QDialog):
         hotkey.editingFinished.connect(lambda: self._save("general/hotkey", hotkey.text()))
         form.addRow(self.tr("Hotkey (restart to apply)"), hotkey)
 
+        theme_combo = QComboBox()
+        theme_combo.addItems(["system", "light", "dark"])
+        theme_combo.setCurrentText(str(config.get(self._settings, "general/theme")))
+        theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        form.addRow(self.tr("Theme"), theme_combo)
+
         autostart_box = QCheckBox()
         autostart_box.setChecked(autostart.is_autostart_enabled())
         autostart_box.toggled.connect(autostart.set_autostart_enabled)
@@ -131,6 +137,10 @@ class SettingsDialog(QDialog):
         form.addRow(self.tr("Paste delay"), delay)
 
         return widget
+
+    def _on_theme_changed(self, value: str) -> None:
+        self._save("general/theme", value)
+        config.apply_theme(value)
 
     # -- Capture ---------------------------------------------------------
 
