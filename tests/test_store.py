@@ -62,6 +62,34 @@ def test_dedup_move_to_top(store):
     assert clips[0].use_count == 2
 
 
+def test_touch_many_preserves_requested_top_to_bottom_order(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    third = store.add("text", {"text/plain": b"third"})
+
+    store.touch_many([first, second, third])
+
+    assert [clip.id for clip in store.all()] == [first, second, third]
+
+
+def test_delete_many_removes_all_requested_clips(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    keep = store.add("text", {"text/plain": b"keep"})
+
+    assert store.delete_many([first, second]) == 2
+    assert [clip.id for clip in store.all()] == [keep]
+
+
+def test_set_pinned_many_updates_all_requested_clips(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+
+    store.set_pinned_many([first, second], True)
+
+    assert all(clip.pinned for clip in store.all())
+
+
 def test_trim_keeps_pinned(store):
     store.max_items = 2
     a = store.add("text", {"text/plain": b"a"})

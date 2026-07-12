@@ -297,10 +297,30 @@ class Store:
         )
         self._conn.commit()
 
+    def touch_many(self, clip_ids: list[int]) -> None:
+        """Move clips to the top while preserving the requested top-to-bottom order."""
+        clip_ids = list(dict.fromkeys(clip_ids))
+        base = int(time.time() * 1000) + len(clip_ids)
+        self._conn.executemany(
+            "UPDATE clips SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
+            [(base - position, clip_id) for position, clip_id in enumerate(clip_ids)],
+        )
+        self._conn.commit()
+
     def delete(self, clip_id: int) -> None:
         self._conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
         self._conn.commit()
         self._search_index.remove(clip_id)
+
+    def delete_many(self, clip_ids: list[int]) -> int:
+        clip_ids = list(dict.fromkeys(clip_ids))
+        cur = self._conn.executemany(
+            "DELETE FROM clips WHERE id = ?", [(clip_id,) for clip_id in clip_ids]
+        )
+        self._conn.commit()
+        for clip_id in clip_ids:
+            self._search_index.remove(clip_id)
+        return cur.rowcount
 
     def update_content(self, clip_id: int, mime_data: dict[str, bytes]) -> int:
         """Replace a clip's content in place (used by external-editor Ctrl+E).
@@ -345,6 +365,14 @@ class Store:
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
         self._conn.execute(
             "UPDATE clips SET pinned = ? WHERE id = ?", (int(pinned), clip_id)
+        )
+        self._conn.commit()
+
+    def set_pinned_many(self, clip_ids: list[int], pinned: bool) -> None:
+        clip_ids = list(dict.fromkeys(clip_ids))
+        self._conn.executemany(
+            "UPDATE clips SET pinned = ? WHERE id = ?",
+            [(int(pinned), clip_id) for clip_id in clip_ids],
         )
         self._conn.commit()
 
