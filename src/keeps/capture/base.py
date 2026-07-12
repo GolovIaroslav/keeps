@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 
@@ -23,14 +24,64 @@ _MIMES_FOR_KIND = {
     "text": [MIME_PLAIN],
 }
 
+_REAL_FORMATTING_TAGS = frozenset(
+    {
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "a",
+        "ul",
+        "ol",
+        "li",
+        "table",
+        "tr",
+        "td",
+        "th",
+        "thead",
+        "tbody",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+)
 
-def detect_kind(available: set[str]) -> str | None:
+
+def html_has_real_formatting(html_bytes: bytes) -> bool:
+    """True if html contains tags beyond a trivial wrapper.
+
+    This covers bold/italic/underline/link/list/table/heading tags.
+
+    Deliberately does NOT count <pre>/<code>/<span>/<div>/<p>/<font> as "real"
+    formatting -- these are exactly the trivial-wrapper tags browsers/chat-UI
+    pages use to shell plain prose (e.g. `<html><body><pre>...</pre></body></html>`),
+    which is the concrete real-world case this function exists to catch (see the
+    PLAN.md item on capture/base.py::detect_kind()).
+    """
+    text = html_bytes.decode("utf-8", errors="replace")
+    return any(
+        tag.lower() in _REAL_FORMATTING_TAGS
+        for tag in re.findall(r"<\s*([a-zA-Z][a-zA-Z0-9]*)", text)
+    )
+
+
+def detect_kind(available: set[str], html_bytes: bytes | None = None) -> str | None:
     """Pick a clip kind from the mime types offered by the clipboard."""
     if MIME_IMAGE in available:
         return "image"
     if MIME_URI_LIST in available:
         return "files"
     if MIME_HTML in available:
+        if (
+            html_bytes is not None
+            and MIME_PLAIN in available
+            and not html_has_real_formatting(html_bytes)
+        ):
+            return "text"
         return "html"
     if MIME_PLAIN in available:
         return "text"
@@ -62,10 +113,17 @@ def build_bundle(
 
     Returns None if no known kind is offered, or the content exceeds max_item_mb.
     """
-    kind = detect_kind(available)
+    html_bytes = reader(MIME_HTML) if MIME_HTML in available else None
+    kind = detect_kind(available, html_bytes)
     if kind is None:
         return None
-    bundle = select_bundle(kind, available, reader)
+    if kind == "html":
+        assert html_bytes is not None
+        bundle = {MIME_HTML: html_bytes}
+        if MIME_PLAIN in available:
+            bundle[MIME_PLAIN] = reader(MIME_PLAIN)
+    else:
+        bundle = select_bundle(kind, available, reader)
     if not bundle:
         return None
     if not within_size_cap(bundle, max_item_mb):

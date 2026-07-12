@@ -8,6 +8,7 @@ from keeps.capture.base import (
     SelfSetGuard,
     build_bundle,
     detect_kind,
+    html_has_real_formatting,
     should_store,
 )
 from keeps.store import Store
@@ -28,11 +29,64 @@ def test_detect_kind(available, expected_kind):
     assert detect_kind(available) == expected_kind
 
 
+HTML_FORMATTING_CASES = [
+    (b"<b>bold</b>", True),
+    (b"<html><body><pre>plain prose</pre></body></html>", False),
+    (b"<ul><li>item</li></ul>", True),
+    (b"<span><div><font>plain</font></div></span>", False),
+]
+
+# Mirrors a real mis-kinded chat-AI browser response wrapped in <pre> for monospace display.
+PRODUCTION_STYLE_HTML = """<html><body><pre>
+Это обычный ответ ассистента без жирного шрифта или ссылок.
+This is plain prose copied from a browser-based chat interface.
+Несколько строк текста, но не настоящее rich formatting.
+</pre></body></html>""".encode()
+
+
+@pytest.mark.parametrize("html_bytes,expected", HTML_FORMATTING_CASES)
+def test_html_has_real_formatting(html_bytes, expected):
+    assert html_has_real_formatting(html_bytes) is expected
+
+
+DETECT_HTML_CONTENT_CASES = [
+    (
+        {MIME_HTML, MIME_PLAIN},
+        b"<html><body><p>hello <b>world</b></p></body></html>",
+        "html",
+    ),
+    (
+        {MIME_HTML, MIME_PLAIN},
+        b"<html><body><pre>plain prose, no formatting</pre></body></html>",
+        "text",
+    ),
+    (
+        {MIME_HTML},
+        b"<html><body><pre>plain prose, no formatting</pre></body></html>",
+        "html",
+    ),
+    ({MIME_HTML, MIME_PLAIN}, b"<ul><li>item</li></ul>", "html"),
+    (
+        {MIME_HTML, MIME_PLAIN},
+        b"<span><div><font>plain prose</font></div></span>",
+        "text",
+    ),
+    ({MIME_HTML, MIME_PLAIN}, PRODUCTION_STYLE_HTML, "text"),
+]
+
+
+@pytest.mark.parametrize("available,html_bytes,expected_kind", DETECT_HTML_CONTENT_CASES)
+def test_detect_kind_uses_html_content(available, html_bytes, expected_kind):
+    assert detect_kind(available, html_bytes) == expected_kind
+
+
 def test_build_bundle_reads_only_relevant_mimes():
     reads = []
 
     def reader(mime: str) -> bytes:
         reads.append(mime)
+        if mime == MIME_HTML:
+            return b"<b>payload</b>"
         return b"payload-" + mime.encode()
 
     result = build_bundle({MIME_PLAIN, MIME_HTML, "text/rtf"}, reader)
@@ -42,9 +96,26 @@ def test_build_bundle_reads_only_relevant_mimes():
     assert kind == "html"
     assert reads == [MIME_HTML, MIME_PLAIN]
     assert mime_data == {
-        MIME_HTML: b"payload-" + MIME_HTML.encode(),
+        MIME_HTML: b"<b>payload</b>",
         MIME_PLAIN: b"payload-" + MIME_PLAIN.encode(),
     }
+
+
+def test_build_bundle_downgrades_unformatted_html_without_rereading_it():
+    reads = []
+    mime_data = {
+        MIME_HTML: b"<html><body><pre>plain prose</pre></body></html>",
+        MIME_PLAIN: b"plain prose",
+    }
+
+    def reader(mime: str) -> bytes:
+        reads.append(mime)
+        return mime_data[mime]
+
+    result = build_bundle({MIME_HTML, MIME_PLAIN}, reader)
+
+    assert result == ("text", {MIME_PLAIN: mime_data[MIME_PLAIN]})
+    assert reads == [MIME_HTML, MIME_PLAIN]
 
 
 def test_build_bundle_unknown_kind_returns_none():
