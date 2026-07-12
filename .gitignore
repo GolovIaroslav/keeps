@@ -27,3 +27,4 @@ build/
 # Local-only planning docs (not published)
 CLAUDE.md
 PLAN.md
+ditto-features.md
