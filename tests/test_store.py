@@ -214,10 +214,13 @@ def test_thumbnail_roundtrip_and_backlog_only_include_missing_images(store):
     without_thumbnail = store.add("image", {"image/png": other_png})
     store.add("text", {"text/plain": b"not an image"})
 
+    source_hash, source_png = store.get_thumbnail_source(with_thumbnail)
+    assert source_png == PNG_1X1
+    assert source_hash == next(clip.hash for clip in store.all() if clip.id == with_thumbnail)
     assert store.get_thumbnail(with_thumbnail) is None
     assert store.clips_missing_thumbnail() == [with_thumbnail, without_thumbnail]
 
-    assert store.set_thumbnail(with_thumbnail, b"small-png") is True
+    assert store.set_thumbnail(with_thumbnail, source_hash, b"small-png") is True
 
     assert store.get_thumbnail(with_thumbnail) == b"small-png"
     assert store.clips_missing_thumbnail() == [without_thumbnail]
@@ -225,15 +228,17 @@ def test_thumbnail_roundtrip_and_backlog_only_include_missing_images(store):
 
 def test_thumbnail_write_after_clip_deletion_is_ignored(store):
     clip_id = store.add("image", {"image/png": PNG_1X1})
+    source_hash, _ = store.get_thumbnail_source(clip_id)
     store.delete(clip_id)
 
-    assert store.set_thumbnail(clip_id, b"late-worker-result") is False
+    assert store.set_thumbnail(clip_id, source_hash, b"late-worker-result") is False
     assert store.get_thumbnail(clip_id) is None
 
 
 def test_deleting_clip_cascades_to_thumbnail(store):
     clip_id = store.add("image", {"image/png": PNG_1X1})
-    store.set_thumbnail(clip_id, b"small-png")
+    source_hash, _ = store.get_thumbnail_source(clip_id)
+    store.set_thumbnail(clip_id, source_hash, b"small-png")
 
     store.delete(clip_id)
 
@@ -242,11 +247,13 @@ def test_deleting_clip_cascades_to_thumbnail(store):
 
 def test_updating_image_content_invalidates_thumbnail(store):
     clip_id = store.add("image", {"image/png": PNG_1X1})
-    store.set_thumbnail(clip_id, b"thumbnail-for-old-image")
+    old_hash, _ = store.get_thumbnail_source(clip_id)
+    store.set_thumbnail(clip_id, old_hash, b"thumbnail-for-old-image")
     edited_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])
 
     store.update_content(clip_id, {"image/png": edited_png})
 
+    assert store.set_thumbnail(clip_id, old_hash, b"late-old-thumbnail") is False
     assert store.get_thumbnail(clip_id) is None
     assert store.clips_missing_thumbnail() == [clip_id]
 

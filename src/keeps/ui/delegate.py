@@ -42,6 +42,10 @@ class ClipItemDelegate(QStyledItemDelegate):
         if cache_key is not None:
             QPixmapCache.remove(cache_key)
 
+    def prune_thumbnail_cache(self, existing_clip_ids: set[int]) -> None:
+        for clip_id in self._thumbnail_cache_keys.keys() - existing_clip_ids:
+            self.invalidate_thumbnail(clip_id)
+
     def _thumbnail_pixmap(self, clip_id: int, clip_hash: str) -> QPixmap | None:
         cache_key = f"keeps-thumbnail:{clip_id}:{clip_hash}"
         previous_key = self._thumbnail_cache_keys.get(clip_id)

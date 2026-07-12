@@ -33,18 +33,29 @@ def generate_thumbnail(png_bytes: bytes) -> bytes | None:
 
 
 class _ThumbnailSignals(QObject):
-    finished = Signal(int, object)  # (clip_id, png_bytes | None)
+    finished = Signal(int, str, object)  # (clip_id, source_hash, png_bytes | None)
 
 
 class _ThumbnailTask(QRunnable):
-    def __init__(self, clip_id: int, png_bytes: bytes, signals: _ThumbnailSignals) -> None:
+    def __init__(
+        self,
+        clip_id: int,
+        source_hash: str,
+        png_bytes: bytes,
+        signals: _ThumbnailSignals,
+    ) -> None:
         super().__init__()
         self._clip_id = clip_id
+        self._source_hash = source_hash
         self._png_bytes = png_bytes
         self._signals = signals
 
     def run(self) -> None:
-        self._signals.finished.emit(self._clip_id, generate_thumbnail(self._png_bytes))
+        self._signals.finished.emit(
+            self._clip_id,
+            self._source_hash,
+            generate_thumbnail(self._png_bytes),
+        )
 
 
 class ThumbnailRuntime(QObject):
@@ -60,6 +71,8 @@ class ThumbnailRuntime(QObject):
         self._active_clip_id: int | None = None
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
+        self._signals = _ThumbnailSignals(self)
+        self._signals.finished.connect(self._on_thumbnail_done)
 
     def on_clip_captured(self, clip_id: int, kind: str) -> None:
         if kind == "image":
@@ -81,22 +94,28 @@ class ThumbnailRuntime(QObject):
             return
         while self._queue:
             clip_id = self._queue.popleft()
-            png_bytes = self._store.get_data(clip_id).get("image/png")
-            if png_bytes is None:
+            source = self._store.get_thumbnail_source(clip_id)
+            if source is None:
                 self._queued_ids.discard(clip_id)
                 continue
+            source_hash, png_bytes = source
             self._active_clip_id = clip_id
-            signals = _ThumbnailSignals(self)
-            signals.finished.connect(self._on_thumbnail_done)
             self._pool.start(
-                _ThumbnailTask(clip_id, png_bytes, signals),
+                _ThumbnailTask(clip_id, source_hash, png_bytes, self._signals),
                 THUMBNAIL_TASK_PRIORITY,
             )
             return
 
-    def _on_thumbnail_done(self, clip_id: int, png_bytes: bytes | None) -> None:
+    def _on_thumbnail_done(
+        self, clip_id: int, source_hash: str, png_bytes: bytes | None
+    ) -> None:
         self._active_clip_id = None
         self._queued_ids.discard(clip_id)
-        if png_bytes is not None and self._store.set_thumbnail(clip_id, png_bytes):
-            self.thumbnail_ready.emit(clip_id)
+        if png_bytes is not None:
+            if self._store.set_thumbnail(clip_id, source_hash, png_bytes):
+                self.thumbnail_ready.emit(clip_id)
+            else:
+                # The clip was edited or its SQLite id was reused while the
+                # worker was decoding. Queue the current content, if any.
+                self._enqueue(clip_id)
         self._start_next()

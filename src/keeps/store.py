@@ -314,13 +314,23 @@ class Store:
         ).fetchall()
         return {row["mime"]: row["data"] for row in rows}
 
-    def set_thumbnail(self, clip_id: int, png: bytes) -> bool:
-        """Store an image thumbnail; return False if its clip no longer exists."""
+    def get_thumbnail_source(self, clip_id: int) -> tuple[str, bytes] | None:
+        """Return the current image content hash and full PNG for thumbnail work."""
+        row = self._conn.execute(
+            "SELECT c.hash, d.data FROM clips c "
+            "JOIN clip_data d ON d.clip_id = c.id AND d.mime = 'image/png' "
+            "WHERE c.id = ? AND c.kind = 'image'",
+            (clip_id,),
+        ).fetchone()
+        return (row["hash"], row["data"]) if row is not None else None
+
+    def set_thumbnail(self, clip_id: int, source_hash: str, png: bytes) -> bool:
+        """Store a thumbnail only if the clip still has the source content hash."""
         cur = self._conn.execute(
             "INSERT INTO thumbs (clip_id, png) "
-            "SELECT id, ? FROM clips WHERE id = ? AND kind = 'image' "
+            "SELECT id, ? FROM clips WHERE id = ? AND kind = 'image' AND hash = ? "
             "ON CONFLICT(clip_id) DO UPDATE SET png = excluded.png",
-            (png, clip_id),
+            (png, clip_id, source_hash),
         )
         self._conn.commit()
         return cur.rowcount > 0

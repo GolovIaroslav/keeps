@@ -221,6 +221,7 @@ def _run_daemon(show_immediately: bool) -> int:
 
     def on_settings_requested() -> None:
         SettingsDialog(ai_runtime, store).exec()
+        popup.refresh()
 
     tray.settings_requested.connect(on_settings_requested)
 

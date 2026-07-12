@@ -387,6 +387,7 @@ class PopupWindow(QWidget):
 
     def refresh(self) -> None:
         self.model.set_query(self.search_edit.text())
+        self._delegate.prune_thumbnail_cache({clip.id for clip in self.store.all()})
 
     def on_thumbnail_ready(self, clip_id: int) -> None:
         self._delegate.invalidate_thumbnail(clip_id)
@@ -614,7 +615,8 @@ class PopupWindow(QWidget):
     def _open_settings(self) -> None:
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
         # Settings behaves identically whether opened from the tray or here.
-        SettingsDialog(self._ai_runtime, self._store).exec()
+        SettingsDialog(self._ai_runtime, self.store).exec()
+        self.refresh()
         # Qt doesn't reliably restore focus to search_edit after a modal
         # dialog closes; _handle_key only fires for events targeting
         # search_edit specifically, so without this the whole keymap
