@@ -18,13 +18,6 @@ def _socket_path() -> str:
     return str(runtime_dir / "keeps.sock")
 
 
-def _default_db_path() -> Path:
-    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-    directory = data_home / "keeps"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / "keeps.db"
-
-
 def _send_message(socket_path: str, message: bytes) -> bool:
     """Try to deliver a request to an already-running daemon.
 
@@ -160,7 +153,9 @@ def _run_daemon(show_immediately: bool) -> int:
 
     settings = config.open_settings()
     config.apply_theme(str(config.get(settings, "general/theme")))
-    store = Store(_default_db_path(), max_items=int(config.get(settings, "general/max_items")))
+    store = Store(
+        config.default_db_path(), max_items=int(config.get(settings, "general/max_items"))
+    )
     watcher = _make_watcher(store, float(config.get(settings, "general/max_item_mb")))
 
     ai_runtime = AiRuntime(store, settings)

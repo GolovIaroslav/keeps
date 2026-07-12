@@ -34,6 +34,13 @@ def settings_path() -> Path:
     return directory / "keeps.ini"
 
 
+def default_db_path() -> Path:
+    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    directory = data_home / "keeps"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "keeps.db"
+
+
 def open_settings() -> QSettings:
     return QSettings(str(settings_path()), QSettings.Format.IniFormat)
 

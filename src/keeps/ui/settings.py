@@ -36,6 +36,41 @@ ABOUT_HTML = """\
 <p><a href="https://github.com/GolovIaroslav/keeps">github.com/GolovIaroslav/keeps</a></p>
 """
 
+# Static reference for the popup keymap (PLAN.md §6, normative) plus the
+# right-click context menu, so the user can look this up inside the app
+# instead of only in the README.
+HOTKEYS_HTML = """\
+<h3>Popup hotkeys</h3>
+<table border="1" cellspacing="0" cellpadding="4">
+<tr><th>Key</th><th>Action</th></tr>
+<tr><td>Ctrl+` (global)</td><td>show/hide the popup</td></tr>
+<tr><td>typing text</td><td>filter the list live</td></tr>
+<tr><td>&uarr;/&darr;, PgUp/PgDn</td>
+    <td>navigate (from the search field, arrows move the list)</td></tr>
+<tr><td>Enter / double-click</td><td>paste the selected item (any format)</td></tr>
+<tr><td>Shift+Enter</td><td>paste as plain text</td></tr>
+<tr><td>Ctrl+C</td><td>copy to clipboard only, no paste</td></tr>
+<tr><td>Del</td><td>delete the item</td></tr>
+<tr><td>Ctrl+E</td>
+    <td>edit externally (xdg-open on a temp file; saving updates the clip)</td></tr>
+<tr><td>F3</td>
+    <td>View: expand the selected item read-only (full text or full-size image)</td></tr>
+<tr><td>F2</td><td>Edit: built-in editor (text clips only)</td></tr>
+<tr><td>Ctrl+P</td><td>pin/unpin</td></tr>
+<tr><td>Ctrl+1..9</td><td>paste the Nth visible item (first 9 are numbered)</td></tr>
+<tr><td>Ctrl+M</td><td>cycle search mode (blended/keywords/meaning) &mdash;
+    only when semantic search is enabled</td></tr>
+<tr><td>Ctrl+scroll, Ctrl+Plus, Ctrl+Minus</td>
+    <td>popup UI scale (remembered between sessions)</td></tr>
+<tr><td>Esc / focus loss</td><td>hide the popup</td></tr>
+</table>
+<p>The popup window can be dragged from its title bar and resized from any edge or corner.</p>
+<p>Right-click menu: paste, paste as text, copy, View (F3), pin/unpin, Edit (F2, built-in,
+text clips only), Edit externally (Ctrl+E), delete. Plus a <b>Special Paste</b> submenu
+(text clips only): UPPERCASE / lowercase / Capitalize / Trim whitespace &mdash; pastes a
+transformed copy without changing the stored clip; menu-only, no dedicated shortcut.</p>
+"""
+
 
 class _DownloadSignals(QObject):
     progress = Signal(int, int)  # (downloaded_bytes, total_bytes)
@@ -352,6 +387,12 @@ class SettingsDialog(QDialog):
         refresh_button.clicked.connect(self._refresh_diagnostics)
         layout.addWidget(refresh_button)
 
+        layout.addWidget(self._build_db_info_group())
+
+        hotkeys = QLabel(HOTKEYS_HTML)
+        hotkeys.setWordWrap(True)
+        layout.addWidget(hotkeys)
+
         about = QLabel(ABOUT_HTML.format(version=__version__))
         about.setOpenExternalLinks(True)
         about.setWordWrap(True)
@@ -359,6 +400,34 @@ class SettingsDialog(QDialog):
 
         self._refresh_diagnostics()
         return widget
+
+    def _build_db_info_group(self) -> QGroupBox:
+        """DB path/size + trim explanation (PLAN.md §9.5). Computed fresh here,
+        which runs once per dialog construction, so values can't go stale
+        across dialog opens the way a value cached at import time would.
+        """
+        group = QGroupBox(self.tr("Database"))
+        form = QFormLayout(group)
+
+        db_path = config.default_db_path()
+        size_bytes = db_path.stat().st_size if db_path.exists() else 0
+        path_label = QLabel(str(db_path))
+        path_label.setWordWrap(True)
+        form.addRow(self.tr("Path"), path_label)
+        form.addRow(self.tr("Size"), QLabel(models.human_size(size_bytes)))
+
+        max_items = int(config.get(self._settings, "general/max_items"))
+        cleanup_label = QLabel(
+            self.tr(
+                "Trimmed after every new capture: the oldest unpinned clips beyond "
+                "the configured limit (currently {max_items}) are deleted. Pinned "
+                "clips are never removed by this cleanup, no matter how many are pinned."
+            ).format(max_items=max_items)
+        )
+        cleanup_label.setWordWrap(True)
+        form.addRow(cleanup_label)
+
+        return group
 
     def _refresh_diagnostics(self) -> None:
         self._diagnostics_list.clear()
