@@ -1,7 +1,9 @@
+import sqlite3
 import time
 
 import pytest
 
+from keeps import store as store_module
 from keeps.store import Store, build_preview, normalize
 
 TEXT_KINDS = {
@@ -230,3 +232,140 @@ def test_add_and_search_5000_records_is_fast(tmp_path):
     assert len(results) == 1
     assert search_elapsed < 0.05, f"search took {search_elapsed * 1000:.1f}ms"
     assert add_elapsed < 10, f"add took {add_elapsed:.2f}s"
+
+
+# -- Ф10: migrations + backups + DB maintenance ------------------------------
+
+
+def test_fresh_db_reaches_latest_version_with_no_backup(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    Store(db_path, max_items=500).close()
+
+    conn = sqlite3.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+
+    assert version == store_module.LATEST_VERSION
+    assert list(tmp_path.glob("*.backup-*")) == []
+
+
+def test_pre_migration_db_gets_stamped_without_losing_data_or_backing_up(tmp_path):
+    """Simulates a DB created by pre-Ф10 code: tables exist (CREATE TABLE IF
+    NOT EXISTS was always run) but user_version was never touched, so
+    SQLite's default of 0 is still there.
+    """
+    db_path = tmp_path / "keeps.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store_module.SCHEMA)
+    conn.execute(
+        "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
+        "VALUES (0, 0, 'text', 'pre-existing clip', 'h', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    s = Store(db_path, max_items=500)
+    clips = s.all()
+    s.close()
+
+    conn = sqlite3.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+
+    assert [c.preview for c in clips] == ["pre-existing clip"]
+    assert version == 1
+    assert list(tmp_path.glob("*.backup-*")) == []
+
+
+def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "keeps.db"
+    s = Store(db_path, max_items=500)
+    s.add("text", {"text/plain": b"before migration"})
+    s.close()
+
+    def add_dummy_column(conn: sqlite3.Connection) -> None:
+        conn.execute("ALTER TABLE clips ADD COLUMN dummy TEXT")
+
+    monkeypatch.setattr(store_module, "LATEST_VERSION", 2)
+    monkeypatch.setattr(store_module, "MIGRATIONS", {2: add_dummy_column})
+
+    s2 = Store(db_path, max_items=500)
+    clips = s2.all()
+    s2.close()
+
+    conn = sqlite3.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(clips)")]
+    conn.close()
+
+    assert [c.preview for c in clips] == ["before migration"]
+    assert version == 2
+    assert "dummy" in columns
+    backups = list(tmp_path.glob("keeps.db.backup-*"))
+    assert len(backups) == 1
+
+
+def test_backup_now_creates_a_restorable_copy(tmp_path):
+    s = Store(tmp_path / "keeps.db", max_items=500)
+    s.add("text", {"text/plain": b"hello"})
+
+    backup_path = s.backup_now()
+    s.close()
+
+    assert backup_path.exists()
+    assert backup_path.name.startswith("keeps.db.backup-")
+
+    restored = Store(backup_path, max_items=500)
+    clips = restored.all()
+    restored.close()
+    assert [c.preview for c in clips] == ["hello"]
+
+
+def test_rotate_backups_keeps_only_newest_three(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    db_path.touch()
+    names = [f"keeps.db.backup-2026010{i}-000000" for i in range(1, 6)]
+    for name in names:
+        (tmp_path / name).touch()
+
+    store_module._rotate_backups(db_path)
+
+    remaining = sorted(p.name for p in tmp_path.glob("keeps.db.backup-*"))
+    assert remaining == names[-3:]
+
+
+def test_compact_shrinks_file_after_bulk_delete(tmp_path):
+    s = Store(tmp_path / "keeps.db", max_items=100_000)
+    for i in range(500):
+        s.add("text", {"text/plain": (f"clip {i} " * 200).encode()})
+    s.clear_history(include_pinned=True)
+
+    before, after = s.compact()
+    s.close()
+    assert after < before
+
+
+def test_clear_history_default_spares_pinned(store):
+    unpinned_id = store.add("text", {"text/plain": b"a"})
+    pinned_id = store.add("text", {"text/plain": b"b"})
+    store.set_pinned(pinned_id, True)
+
+    deleted = store.clear_history()
+
+    assert deleted == 1
+    remaining_ids = [c.id for c in store.all()]
+    assert remaining_ids == [pinned_id]
+    assert unpinned_id not in remaining_ids
+
+
+def test_clear_history_include_pinned_deletes_everything(store):
+    store.add("text", {"text/plain": b"a"})
+    pinned_id = store.add("text", {"text/plain": b"b"})
+    store.set_pinned(pinned_id, True)
+
+    deleted = store.clear_history(include_pinned=True)
+
+    assert deleted == 2
+    assert store.all() == []

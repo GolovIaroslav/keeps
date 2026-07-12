@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sqlite3
 import struct
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +41,37 @@ CREATE TABLE IF NOT EXISTS embeddings (
 """
 
 PREVIEW_MAX_CHARS = 300
+
+# Schema version history (PLAN.md §5/Ф10). SCHEMA above (CREATE TABLE IF NOT
+# EXISTS) always brings any DB -- brand new, or one that predates this
+# migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
+# entries for v2 and beyond. First real migration lands in Ф14 (groups).
+LATEST_VERSION = 1
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {}
+
+BACKUP_KEEP = 3
+
+
+def backup_database(db_path: Path, conn: sqlite3.Connection | None = None) -> Path:
+    """Copy db_path to a timestamped sibling, then rotate old backups.
+
+    Checkpoints WAL first (if a connection is given) so the copy is a
+    self-consistent snapshot restorable by plain file copy.
+    """
+    db_path = Path(db_path)
+    if conn is not None:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    backup_path = db_path.with_name(f"{db_path.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(db_path, backup_path)
+    _rotate_backups(db_path)
+    return backup_path
+
+
+def _rotate_backups(db_path: Path, keep: int = BACKUP_KEEP) -> None:
+    """Keep only the `keep` newest backups (filenames sort chronologically)."""
+    backups = sorted(db_path.parent.glob(f"{db_path.name}.backup-*"))
+    for stale in backups[:-keep]:
+        stale.unlink()
 
 
 @dataclass(frozen=True)
@@ -99,15 +132,77 @@ def build_preview(kind: str, mime_data: dict[str, bytes]) -> str:
 class Store:
     def __init__(self, db_path: Path | str, max_items: int = 500):
         self.max_items = max_items
-        self._conn = sqlite3.connect(db_path)
+        self._db_path = Path(db_path)
+        self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            # SCHEMA already brought this DB up to the v1 baseline above --
+            # whether it's brand new or predates this migration system
+            # entirely -- so no real migration ran and no backup is needed
+            # just to stamp the version.
+            self._conn.execute("PRAGMA user_version = 1")
+            self._conn.commit()
+            version = 1
+        if version >= LATEST_VERSION:
+            return
+        backup_database(self._db_path, self._conn)
+        self._conn.execute("BEGIN")
+        try:
+            for target in range(version + 1, LATEST_VERSION + 1):
+                MIGRATIONS[target](self._conn)
+                self._conn.execute(f"PRAGMA user_version = {target}")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def close(self) -> None:
         self._conn.close()
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def backup_now(self) -> Path:
+        """Manual backup, e.g. Settings > Database > Backup now."""
+        return backup_database(self._db_path, self._conn)
+
+    def compact(self) -> tuple[int, int]:
+        """VACUUM the DB file; returns (size_before, size_after) in bytes.
+
+        Checkpoints WAL first so "before" reflects committed data (including
+        free pages from prior deletes) rather than an arbitrary partially
+        checkpointed main file -- WAL auto-checkpoints only every ~1000
+        pages, so without this a bulk delete right before Compact could
+        still show as "no change" simply because it hadn't been
+        checkpointed into the main file yet.
+        """
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        before = self._db_path.stat().st_size
+        self._conn.execute("VACUUM")
+        # In WAL mode VACUUM's own writes land in a fresh WAL; without this
+        # checkpoint the file on disk still shows the pre-VACUUM size until
+        # the connection is closed.
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = self._db_path.stat().st_size
+        return before, after
+
+    def clear_history(self, include_pinned: bool = False) -> int:
+        """Delete clips (optionally including pinned). Returns count deleted."""
+        if include_pinned:
+            cur = self._conn.execute("DELETE FROM clips")
+        else:
+            cur = self._conn.execute("DELETE FROM clips WHERE pinned = 0")
+        self._conn.commit()
+        return cur.rowcount
 
     def add(self, kind: str, mime_data: dict[str, bytes]) -> int:
         """Insert a new clip, or move an existing duplicate to the top."""
