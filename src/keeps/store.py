@@ -175,6 +175,9 @@ class Store:
     def __init__(self, db_path: Path | str, max_items: int = 500):
         self.max_items = max_items
         self._db_path = Path(db_path)
+        self._database_existed = (
+            self._db_path.exists() and self._db_path.stat().st_size > 0
+        )
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -190,14 +193,20 @@ class Store:
     def _migrate(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
-            # SCHEMA already brought this DB up to the v1 baseline above --
-            # whether it's brand new or predates this migration system
-            # entirely -- so no real migration ran and no backup is needed
-            # just to stamp the version.
-            for target in range(2, LATEST_VERSION + 1):
-                MIGRATIONS[target](self._conn)
-            self._conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
-            self._conn.commit()
+            # SCHEMA brought both a brand-new DB and a pre-Ф10 legacy DB to
+            # v1. From v2 onward real ALTERs follow, so an existing legacy
+            # file must be protected even though it was never version-stamped.
+            if self._database_existed and LATEST_VERSION > 1:
+                backup_database(self._db_path, self._conn)
+            self._conn.execute("BEGIN")
+            try:
+                for target in range(2, LATEST_VERSION + 1):
+                    MIGRATIONS[target](self._conn)
+                    self._conn.execute(f"PRAGMA user_version = {target}")
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
             version = LATEST_VERSION
         if version >= LATEST_VERSION:
             return

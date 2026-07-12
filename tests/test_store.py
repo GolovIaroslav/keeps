@@ -397,7 +397,7 @@ def test_fresh_db_reaches_latest_version_with_no_backup(tmp_path):
     assert list(tmp_path.glob("*.backup-*")) == []
 
 
-def test_pre_migration_db_gets_stamped_without_losing_data_or_backing_up(tmp_path):
+def test_pre_migration_db_gets_migrated_with_backup_and_without_losing_data(tmp_path):
     """Simulates a DB created by pre-Ф10 code: tables exist (CREATE TABLE IF
     NOT EXISTS was always run) but user_version was never touched, so
     SQLite's default of 0 is still there.
@@ -422,7 +422,7 @@ def test_pre_migration_db_gets_stamped_without_losing_data_or_backing_up(tmp_pat
 
     assert [c.preview for c in clips] == ["pre-existing clip"]
     assert version == store_module.LATEST_VERSION
-    assert list(tmp_path.glob("*.backup-*")) == []
+    assert len(list(tmp_path.glob("*.backup-*"))) == 1
 
 
 def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
@@ -480,6 +480,30 @@ def test_v1_migration_adds_groups_and_manual_order_with_backup(tmp_path):
     assert {"group_id", "manual_order"} <= columns
     assert "groups" in tables
     assert clip.preview == "survives" and clip.group_id is None
+    assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
+
+
+def test_legacy_v0_migration_rolls_back_partial_schema_change(tmp_path, monkeypatch):
+    db_path = tmp_path / "keeps.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store_module.SCHEMA)
+    conn.commit()
+    conn.close()
+
+    def failing_migration(conn: sqlite3.Connection) -> None:
+        conn.execute("ALTER TABLE clips ADD COLUMN should_roll_back TEXT")
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(store_module, "MIGRATIONS", {2: failing_migration})
+    with pytest.raises(RuntimeError, match="migration failed"):
+        Store(db_path)
+
+    conn = sqlite3.connect(db_path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert "should_roll_back" not in columns
+    assert version == 0
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
 
 

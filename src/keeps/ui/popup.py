@@ -359,6 +359,7 @@ class PopupWindow(QWidget):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.tabs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tabs.customContextMenuRequested.connect(self._show_tab_context_menu)
+        self.tabs.installEventFilter(self)
         self._refresh_tabs()
 
         search_row = QHBoxLayout()
@@ -560,6 +561,8 @@ class PopupWindow(QWidget):
                 # through to _handle_key would sendEvent() the event straight
                 # back to list_view and recurse through this filter.
                 return False
+            return self._handle_key(event)
+        if obj is self.tabs and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
         if obj is self._mode_badge and event.type() == QEvent.Type.MouseButtonPress:
             self._cycle_search_mode()
