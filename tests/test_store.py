@@ -133,6 +133,19 @@ def test_search_index_rebuilds_from_persisted_full_content(tmp_path):
     assert "persisted needle" in snippet
 
 
+def test_search_index_rebuild_handles_empty_file_list(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    store = Store(db_path)
+    clip_id = store.add("files", {"text/uri-list": b""})
+    store.close()
+
+    reopened = Store(db_path)
+    clips = reopened.all()
+    reopened.close()
+
+    assert [clip.id for clip in clips] == [clip_id]
+
+
 def test_hash_stable_across_instances(tmp_path):
     s1 = Store(tmp_path / "keeps.db")
     clip_id = s1.add("text", {"text/plain": b"stable content"})

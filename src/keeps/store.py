@@ -194,7 +194,8 @@ class Store:
         from keeps.search import CONTENT_LIMIT_BYTES
 
         rows = self._conn.execute(
-            "SELECT c.id, c.kind, c.ocr_text, d.mime, substr(d.data, 1, ?) AS data "
+            "SELECT c.id, c.kind, c.ocr_text, d.mime, "
+            "coalesce(substr(d.data, 1, ?), X'') AS data "
             "FROM clips c LEFT JOIN clip_data d ON d.clip_id = c.id AND ("
             "  (c.kind IN ('text', 'html') AND d.mime IN ('text/plain', 'text/html')) OR "
             "  (c.kind = 'files' AND d.mime = 'text/uri-list')"
