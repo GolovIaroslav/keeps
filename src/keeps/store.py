@@ -10,6 +10,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from keeps.search import MatchReason, SearchIndex
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS clips (
@@ -140,6 +144,10 @@ class Store:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         self._migrate()
+        from keeps.search import SearchIndex
+
+        self._search_index: SearchIndex = SearchIndex()
+        self._rebuild_search_index()
 
     def _migrate(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -171,6 +179,26 @@ class Store:
     def db_path(self) -> Path:
         return self._db_path
 
+    def _rebuild_search_index(self) -> None:
+        rows = self._conn.execute(
+            "SELECT c.id, c.kind, c.ocr_text, d.mime, d.data FROM clips c "
+            "LEFT JOIN clip_data d ON d.clip_id = c.id ORDER BY c.id"
+        ).fetchall()
+        metadata: dict[int, tuple[str, str | None]] = {}
+        mime_data_by_id: dict[int, dict[str, bytes]] = {}
+        for row in rows:
+            clip_id = row["id"]
+            metadata[clip_id] = (row["kind"], row["ocr_text"])
+            if row["mime"] is not None:
+                mime_data_by_id.setdefault(clip_id, {})[row["mime"]] = row["data"]
+        for clip_id, (kind, ocr_text) in metadata.items():
+            self._search_index.upsert(
+                clip_id,
+                kind,
+                mime_data_by_id.get(clip_id, {}),
+                ocr_text,
+            )
+
     def backup_now(self) -> Path:
         """Manual backup, e.g. Settings > Database > Backup now."""
         return backup_database(self._db_path, self._conn)
@@ -198,11 +226,15 @@ class Store:
     def clear_history(self, include_pinned: bool = False) -> int:
         """Delete clips (optionally including pinned). Returns count deleted."""
         if include_pinned:
-            cur = self._conn.execute("DELETE FROM clips")
+            rows = self._conn.execute("DELETE FROM clips RETURNING id").fetchall()
         else:
-            cur = self._conn.execute("DELETE FROM clips WHERE pinned = 0")
+            rows = self._conn.execute(
+                "DELETE FROM clips WHERE pinned = 0 RETURNING id"
+            ).fetchall()
         self._conn.commit()
-        return cur.rowcount
+        for row in rows:
+            self._search_index.remove(row["id"])
+        return len(rows)
 
     def add(self, kind: str, mime_data: dict[str, bytes]) -> int:
         """Insert a new clip, or move an existing duplicate to the top."""
@@ -229,6 +261,7 @@ class Store:
             [(clip_id, mime, data) for mime, data in mime_data.items()],
         )
         self._conn.commit()
+        self._search_index.upsert(clip_id, kind, mime_data)
         self.trim()
         return clip_id
 
@@ -244,6 +277,7 @@ class Store:
     def delete(self, clip_id: int) -> None:
         self._conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
         self._conn.commit()
+        self._search_index.remove(clip_id)
 
     def update_content(self, clip_id: int, mime_data: dict[str, bytes]) -> int:
         """Replace a clip's content in place (used by external-editor Ctrl+E).
@@ -253,7 +287,7 @@ class Store:
         touched) per the dedup invariant. Returns the resulting clip id.
         """
         row = self._conn.execute(
-            "SELECT kind FROM clips WHERE id = ?", (clip_id,)
+            "SELECT kind, ocr_text FROM clips WHERE id = ?", (clip_id,)
         ).fetchone()
         if row is None:
             raise ValueError(f"no such clip: {clip_id}")
@@ -282,6 +316,7 @@ class Store:
         if kind == "image":
             self._conn.execute("DELETE FROM thumbs WHERE clip_id = ?", (clip_id,))
         self._conn.commit()
+        self._search_index.upsert(clip_id, kind, mime_data, row["ocr_text"])
         return clip_id
 
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
@@ -292,15 +327,17 @@ class Store:
 
     def trim(self) -> None:
         """Delete the oldest unpinned clips beyond max_items."""
-        self._conn.execute(
+        rows = self._conn.execute(
             "DELETE FROM clips WHERE pinned = 0 AND id IN ("
             "  SELECT id FROM clips WHERE pinned = 0"
             "  ORDER BY last_used_at DESC, id DESC"
             "  LIMIT -1 OFFSET ?"
-            ")",
+            ") RETURNING id",
             (self.max_items,),
-        )
+        ).fetchall()
         self._conn.commit()
+        for row in rows:
+            self._search_index.remove(row["id"])
 
     def all(self) -> list[Clip]:
         rows = self._conn.execute(
@@ -342,26 +379,21 @@ class Store:
         return row["png"] if row is not None else None
 
     def search(self, query: str) -> list[Clip]:
-        """In-memory, casefold-based filter (SQLite LIKE breaks on Cyrillic).
+        return self.search_with_reasons(query)[0]
 
-        Matches preview and, when present, ocr_text -- OCR-recognized text
-        always participates in plain substring search, independent of any
-        ai/* toggle (PLAN.md §9).
-        """
-        needle = normalize(query)
-        if not needle:
-            return self.all()
-        return [clip for clip in self.all() if self._matches(clip, needle)]
-
-    @staticmethod
-    def _matches(clip: Clip, needle: str) -> bool:
-        if needle in normalize(clip.preview):
-            return True
-        return clip.ocr_text is not None and needle in normalize(clip.ocr_text)
+    def search_with_reasons(
+        self, query: str
+    ) -> tuple[list[Clip], dict[int, MatchReason]]:
+        """Full-content, casefolded AND search plus exact/OCR match reasons."""
+        if not query.strip():
+            return self.all(), {}
+        reasons = self._search_index.search(query)
+        return [clip for clip in self.all() if clip.id in reasons], reasons
 
     def set_ocr_text(self, clip_id: int, text: str) -> None:
         self._conn.execute("UPDATE clips SET ocr_text = ? WHERE id = ?", (text, clip_id))
         self._conn.commit()
+        self._search_index.update_ocr(clip_id, text)
 
     def set_embedding(self, clip_id: int, model: str, vec: bytes) -> None:
         self._conn.execute(

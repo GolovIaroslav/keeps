@@ -4,6 +4,7 @@ import time
 import pytest
 
 from keeps import store as store_module
+from keeps.search import MatchReason
 from keeps.store import Store, build_preview, normalize
 
 TEXT_KINDS = {
@@ -95,6 +96,26 @@ def test_search_cyrillic_case_insensitive(store):
     results = store.search("привет")
     assert len(results) == 1
     assert "Привет" in results[0].preview
+
+
+def test_search_uses_full_content_and_reports_match_reason(store):
+    clip_id = store.add("text", {"text/plain": (b"x" * 400) + b" hidden needle"})
+
+    results, reasons = store.search_with_reasons("needle hidden")
+
+    assert [clip.id for clip in results] == [clip_id]
+    assert reasons == {clip_id: MatchReason.EXACT}
+
+
+def test_search_index_tracks_content_updates_and_deletion(store):
+    clip_id = store.add("text", {"text/plain": b"before"})
+
+    store.update_content(clip_id, {"text/plain": b"after"})
+    assert store.search("before") == []
+    assert [clip.id for clip in store.search("after")] == [clip_id]
+
+    store.delete(clip_id)
+    assert store.search("after") == []
 
 
 def test_hash_stable_across_instances(tmp_path):
