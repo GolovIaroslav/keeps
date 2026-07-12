@@ -197,10 +197,13 @@ class AiRuntime(QObject):
         minutes = float(config.get(self._settings, "ai/model_idle_unload_minutes"))
         if minutes <= 0:
             return  # 0 = never auto-unload
-        if self._text_embedder is None or not self._text_embedder.is_loaded:
+        idle = time.monotonic() - self._last_activity
+        if idle < minutes * 60:
             return
-        if time.monotonic() - self._last_activity >= minutes * 60:
+        if self._text_embedder is not None and self._text_embedder.is_loaded:
             self._text_embedder.unload()
+        if self._ocr_engine is not None and self._ocr_engine.is_loaded:
+            self.reset_ocr_engine()
 
     # -- text embedder lifecycle (Model management) -------------------------
 
@@ -316,6 +319,7 @@ class AiRuntime(QObject):
         engine = self._get_ocr_engine()
         if engine is not None:
             engine.load()
+            self._touch_activity()
 
     def unload_ocr_engine(self) -> None:
         if self._ocr_engine is not None:
@@ -393,6 +397,7 @@ class AiRuntime(QObject):
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
         task = _OcrTask(engine, clip_id, png_bytes, signals, embed_fn)
+        self._touch_activity()
         QThreadPool.globalInstance().start(task, OCR_TASK_PRIORITY)
 
     def _on_ocr_done(self, clip_id: int, text: str, vec_bytes: bytes | None) -> None:

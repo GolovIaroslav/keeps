@@ -57,6 +57,7 @@ class FakeEmbedder:
 
     def unload(self) -> None:
         self.unloaded = True
+        self.is_loaded = False
 
 
 class FakeOcrEngine:
@@ -65,7 +66,11 @@ class FakeOcrEngine:
     def __init__(self, text: str = "recognized text") -> None:
         self.text = text
         self.calls = 0
+        self.is_loaded = True
         self.unloaded = False
+
+    def load(self) -> None:
+        self.is_loaded = True
 
     def extract_text(self, png_bytes: bytes) -> str:
         self.calls += 1
@@ -73,6 +78,7 @@ class FakeOcrEngine:
 
     def unload(self) -> None:
         self.unloaded = True
+        self.is_loaded = False
 
 
 @pytest.fixture(scope="module")
@@ -419,6 +425,69 @@ def test_idle_unload_unloads_when_past_threshold(qapp, store, settings):
     runtime._check_idle_unload()
 
     assert fake.unloaded is True
+
+
+def test_idle_unload_unloads_ocr_engine_when_past_threshold(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    fake = FakeOcrEngine()
+    runtime._ocr_engine = fake
+    runtime._last_activity = time.monotonic() - 120  # 2 minutes ago
+
+    runtime._check_idle_unload()
+
+    assert fake.unloaded is True
+    assert runtime._ocr_engine is None
+
+
+def test_idle_unload_checks_both_models_in_one_pass(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    fake_embedder = FakeEmbedder()
+    fake_ocr = FakeOcrEngine()
+    runtime._text_embedder = fake_embedder
+    runtime._ocr_engine = fake_ocr
+    runtime._last_activity = time.monotonic() - 120  # 2 minutes ago
+
+    runtime._check_idle_unload()
+
+    assert fake_embedder.unloaded is True
+    assert fake_ocr.unloaded is True
+
+
+def test_text_embedding_touches_shared_idle_activity(qapp, store, settings):
+    runtime = _make_runtime(store, settings)
+    runtime._text_embedder = FakeEmbedder()
+    old_activity = time.monotonic() - 120
+    runtime._last_activity = old_activity
+
+    runtime.embed_text("activity")
+
+    assert runtime._last_activity > old_activity
+
+
+def test_ocr_processing_touches_shared_idle_activity(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    runtime._ocr_engine = FakeOcrEngine()
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    old_activity = time.monotonic() - 120
+    runtime._last_activity = old_activity
+
+    runtime._process_clip_ocr(clip_id)
+
+    assert runtime._last_activity > old_activity
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+
+
+def test_loading_ocr_engine_touches_shared_idle_activity(qapp, store, settings):
+    runtime = _make_runtime(store, settings)
+    runtime._ocr_engine = FakeOcrEngine()
+    old_activity = time.monotonic() - 120
+    runtime._last_activity = old_activity
+
+    runtime.load_ocr_engine()
+
+    assert runtime._last_activity > old_activity
 
 
 def test_idle_unload_never_fires_when_minutes_is_zero(qapp, store, settings):
