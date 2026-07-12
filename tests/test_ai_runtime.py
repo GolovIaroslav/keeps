@@ -26,7 +26,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QSettings
 
 from keeps.ai import models
-from keeps.ai.runtime import AiRuntime
+from keeps.ai.runtime import AiRuntime, available_ocr_language_codes
 from keeps.store import Store
 
 PNG_1X1 = bytes.fromhex(
@@ -65,10 +65,14 @@ class FakeOcrEngine:
     def __init__(self, text: str = "recognized text") -> None:
         self.text = text
         self.calls = 0
+        self.unloaded = False
 
     def extract_text(self, png_bytes: bytes) -> str:
         self.calls += 1
         return self.text
+
+    def unload(self) -> None:
+        self.unloaded = True
 
 
 @pytest.fixture(scope="module")
@@ -316,6 +320,90 @@ def test_encode_query_async_empty_query_short_circuits(qapp, store, settings):
     )
 
     assert received == {"query": "   ", "scores": {}}
+
+
+# -- OCR language selection (Ф9.6 PART 2) ------------------------------------
+
+
+def test_available_ocr_language_codes_requires_detector_downloaded():
+    # Every recognizer "downloaded", but the shared detector isn't -- nothing
+    # can run without it.
+    def is_downloaded_fn(spec):
+        return spec is not models.OCR_DET
+
+    assert available_ocr_language_codes(["eslav", "en"], is_downloaded_fn) == []
+
+
+def test_available_ocr_language_codes_filters_unknown_and_not_downloaded():
+    downloaded_recs = {"eslav"}
+
+    def is_downloaded_fn(spec):
+        if spec is models.OCR_DET:
+            return True
+        return any(spec is models.OCR_REC.get(code) for code in downloaded_recs)
+
+    result = available_ocr_language_codes(["eslav", "en", "made-up-code"], is_downloaded_fn)
+
+    assert result == ["eslav"]
+
+
+def test_available_ocr_language_codes_preserves_requested_order():
+    result = available_ocr_language_codes(["latin", "en", "ch"], lambda spec: True)
+
+    assert result == ["latin", "en", "ch"]
+
+
+def test_available_ocr_language_codes_empty_when_nothing_selected():
+    assert available_ocr_language_codes([], lambda spec: True) == []
+
+
+def test_get_ocr_engine_returns_none_when_nothing_downloaded(
+    store, settings, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    runtime = _make_runtime(store, settings)
+
+    assert runtime._get_ocr_engine() is None
+
+
+def test_load_ocr_engine_noop_when_nothing_downloaded(store, settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    runtime = _make_runtime(store, settings)
+
+    runtime.load_ocr_engine()  # must not raise despite no downloaded model
+
+
+def test_ocr_status_not_downloaded_when_no_language_available(
+    store, settings, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    runtime = _make_runtime(store, settings)
+
+    assert runtime.ocr_status() == models.ModelStatus.NOT_DOWNLOADED
+
+
+def test_process_clip_ocr_noop_when_nothing_downloaded(
+    qapp, store, settings, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    _settle(qapp)
+
+    assert clip_id in store.clips_missing_ocr()
+
+
+def test_reset_ocr_engine_clears_cache_and_unloads(qapp, store, settings):
+    runtime = _make_runtime(store, settings)
+    fake = FakeOcrEngine()
+    runtime._ocr_engine = fake
+
+    runtime.reset_ocr_engine()
+
+    assert fake.unloaded is True
+    assert runtime._ocr_engine is None
 
 
 # -- idle-unload (Model management, PLAN.md §9.1) ----------------------------

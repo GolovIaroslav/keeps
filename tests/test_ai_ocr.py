@@ -2,11 +2,14 @@ import numpy as np
 import pytest
 
 from keeps.ai.ocr import (
+    _best_recognition,
     _postprocess_detection,
     _resize_for_detection,
     ctc_collapse,
     ctc_greedy_decode,
+    ctc_greedy_decode_with_confidence,
     decode_indices,
+    dict_path_for,
     load_char_list,
     order_points_clockwise,
     unclip_box,
@@ -46,12 +49,101 @@ def test_ctc_greedy_decode_with_space_token():
 
 
 def test_load_char_list_shape_and_boundaries():
-    chars = load_char_list()
+    chars = load_char_list(dict_path_for("eslav"))
     assert len(chars) == 519  # blank + 517-entry eslav dict + trailing space
     assert chars[0] == "<blank>"
     assert chars[-1] == " "
     assert "А" in chars  # Cyrillic present
     assert "a" in chars  # Latin present
+
+
+# -- ctc_greedy_decode_with_confidence ---------------------------------------
+#
+# The real PP-OCRv5 recognizer ONNX output is already a per-timestep softmax
+# distribution (verified live against the downloaded eslav weights: every row
+# summed to ~1.0), so ctc_greedy_decode_with_confidence does NOT re-normalize
+# -- test rows below are plain probabilities (each row summing to 1), fed in
+# directly as "logits", matching what the real model actually produces.
+
+
+def _probs(rows: list[list[float]]) -> np.ndarray:
+    return np.array(rows, dtype=np.float64)
+
+
+def test_ctc_confidence_clean_single_char_high_confidence():
+    # One timestep, "a" (index 1) dominant at 0.996.
+    logits = _probs([[0.001, 0.996, 0.001, 0.001, 0.001]])
+    text, confidence = ctc_greedy_decode_with_confidence(logits, CHARS)
+    assert text == "a"
+    assert confidence == pytest.approx(0.996, abs=1e-9)
+
+
+def test_ctc_confidence_low_confidence_garbled_sequence():
+    # One timestep, "a" only narrowly beats "b"/"c" -- a garbled/uncertain pick.
+    logits = _probs([[0.05, 0.30, 0.28, 0.27, 0.10]])
+    text, confidence = ctc_greedy_decode_with_confidence(logits, CHARS)
+    assert text == "a"
+    assert confidence == pytest.approx(0.30, abs=1e-9)
+
+
+def test_ctc_confidence_all_blank_sequence_is_zero_not_nan():
+    logits = _probs(
+        [
+            [0.97, 0.01, 0.01, 0.005, 0.005],
+            [0.96, 0.01, 0.01, 0.01, 0.01],
+        ]
+    )
+    text, confidence = ctc_greedy_decode_with_confidence(logits, CHARS)
+    assert text == ""
+    assert confidence == 0.0
+
+
+def test_ctc_confidence_duplicate_then_blank_averages_only_surviving_timesteps():
+    # t0: "a" @0.90, t1: "a" @0.50 (same class as t0 -> collapsed, its own
+    # lower prob must NOT be counted), t2: blank @0.90 (dropped entirely),
+    # t3: "b" @0.80. If confidence wrongly averaged over all 4 raw timesteps
+    # (or the duplicate's own prob) instead of just the 2 surviving picks,
+    # this would not equal mean(0.90, 0.80).
+    logits = _probs(
+        [
+            [0.02, 0.90, 0.03, 0.03, 0.02],  # a, kept (first of the "a" run)
+            [0.10, 0.50, 0.20, 0.10, 0.10],  # a again, collapsed (dup)
+            [0.90, 0.03, 0.03, 0.02, 0.02],  # blank, dropped
+            [0.03, 0.03, 0.80, 0.07, 0.07],  # b, kept
+        ]
+    )
+    text, confidence = ctc_greedy_decode_with_confidence(logits, CHARS)
+    assert text == "ab"
+    assert confidence == pytest.approx((0.90 + 0.80) / 2, abs=1e-9)
+
+
+def test_ctc_confidence_text_matches_plain_decode_for_single_recognizer():
+    # Regression guard for the multi-recognizer refactor: argmax (and
+    # therefore decoded text) must be identical to the pre-confidence-scoring
+    # ctc_greedy_decode, for arbitrary input -- only the confidence number is
+    # new, the text output must not change.
+    rng = np.random.default_rng(0)
+    logits = rng.normal(size=(12, len(CHARS)))
+    class_ids = np.argmax(logits, axis=-1).tolist()
+    expected_text = ctc_greedy_decode(class_ids, CHARS)
+
+    text, _confidence = ctc_greedy_decode_with_confidence(logits, CHARS)
+    assert text == expected_text
+
+
+# -- _best_recognition (multi-recognizer merge logic) ------------------------
+
+BEST_RECOGNITION_CASES = [
+    ([("hello", 0.5)], ("hello", 0.5)),  # single candidate: returned unchanged
+    ([("a", 0.2), ("b", 0.9), ("c", 0.5)], ("b", 0.9)),  # highest confidence wins
+    ([("x", 0.7), ("y", 0.7)], ("x", 0.7)),  # tie: first candidate wins
+    ([("x", 0.9), ("y", 0.95), ("z", 0.1)], ("y", 0.95)),  # winner not first or last
+]
+
+
+@pytest.mark.parametrize("candidates,expected", BEST_RECOGNITION_CASES)
+def test_best_recognition(candidates, expected):
+    assert _best_recognition(candidates) == expected
 
 
 def test_resize_for_detection_keeps_aspect_and_multiple_of_32():

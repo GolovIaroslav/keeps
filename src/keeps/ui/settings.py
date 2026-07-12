@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -78,25 +79,31 @@ class _DownloadSignals(QObject):
 
 
 class _DownloadTask(QRunnable):
-    """Runs off the main thread: fetch every file in a ModelSpec, verifying
-    sha256 as it goes (ai/download.py). Never touches Store/Qt beyond emitting.
+    """Runs off the main thread: fetch every file in one or more ModelSpecs
+    (e.g. OCR's shared detector + one recognizer, downloaded together as a
+    single user-facing "Download" action), verifying sha256 as it goes
+    (ai/download.py). Never touches Store/Qt beyond emitting.
     """
 
-    def __init__(self, spec: models.ModelSpec, signals: _DownloadSignals) -> None:
+    def __init__(self, specs: tuple[models.ModelSpec, ...], signals: _DownloadSignals) -> None:
         super().__init__()
-        self._spec = spec
+        self._specs = specs
         self._signals = signals
 
     def run(self) -> None:
         try:
-            for file in self._spec.files:
-                dest = models.file_dest(self._spec, file)
-                download.download_file(
-                    file.url,
-                    dest,
-                    file.sha256,
-                    progress_cb=lambda done, total: self._signals.progress.emit(done, total),
-                )
+            for spec in self._specs:
+                for file in spec.files:
+                    dest = models.file_dest(spec, file)
+                    if dest.is_file() and dest.stat().st_size == file.size_bytes:
+                        continue  # already present -- e.g. the OCR detector,
+                        # shared across every language's per-language download
+                    download.download_file(
+                        file.url,
+                        dest,
+                        file.sha256,
+                        progress_cb=lambda done, total: self._signals.progress.emit(done, total),
+                    )
             self._signals.finished.emit(True, "")
         except Exception as exc:  # surfaced in the UI, must not crash the daemon
             self._signals.finished.emit(False, str(exc))
@@ -256,21 +263,13 @@ class SettingsDialog(QDialog):
             layout.addWidget(
                 self._build_model_section(
                     self.tr("Text embeddings"),
-                    models.TEXT_EMBED,
+                    (models.TEXT_EMBED,),
                     self._ai_runtime.text_embed_status,
                     self._ai_runtime.load_text_embedder,
                     self._ai_runtime.unload_text_embedder,
                 )
             )
-            layout.addWidget(
-                self._build_model_section(
-                    self.tr("OCR"),
-                    models.OCR,
-                    self._ai_runtime.ocr_status,
-                    self._ai_runtime.load_ocr_engine,
-                    self._ai_runtime.unload_ocr_engine,
-                )
-            )
+        layout.addWidget(self._build_ocr_languages_section())
         layout.addWidget(
             self._build_model_section(self.tr("Image-semantic search"), None, None, None, None)
         )
@@ -291,7 +290,7 @@ class SettingsDialog(QDialog):
     def _build_model_section(
         self,
         title: str,
-        spec: models.ModelSpec | None,
+        specs: tuple[models.ModelSpec, ...] | None,
         status_fn,
         load_fn,
         unload_fn,
@@ -299,7 +298,7 @@ class SettingsDialog(QDialog):
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
 
-        if spec is None:
+        if not specs:
             layout.addWidget(QLabel(self.tr("Not implemented yet.")))
             return box
 
@@ -323,11 +322,12 @@ class SettingsDialog(QDialog):
 
         state = {"downloading": False}
 
+        total_size = sum(spec.total_size_bytes for spec in specs)
+        dirs = ", ".join(str(models.model_dir(spec)) for spec in specs)
+
         def refresh() -> None:
             status = models.ModelStatus.DOWNLOADING if state["downloading"] else status_fn()
-            path_label.setText(
-                f"{models.model_dir(spec)} ({models.human_size(spec.total_size_bytes)})"
-            )
+            path_label.setText(f"{dirs} ({models.human_size(total_size)})")
             status_label.setText(self.tr("Status: {status}").format(status=status.value))
             progress.setVisible(status == models.ModelStatus.DOWNLOADING)
             download_btn.setEnabled(status == models.ModelStatus.NOT_DOWNLOADED)
@@ -352,10 +352,11 @@ class SettingsDialog(QDialog):
             signals = _DownloadSignals(self)
             signals.progress.connect(on_progress)
             signals.finished.connect(on_finished)
-            QThreadPool.globalInstance().start(_DownloadTask(spec, signals))
+            QThreadPool.globalInstance().start(_DownloadTask(specs, signals))
 
         def on_delete() -> None:
-            models.delete_files(spec)
+            for spec in specs:
+                models.delete_files(spec)
             refresh()
 
         def on_load() -> None:
@@ -372,6 +373,147 @@ class SettingsDialog(QDialog):
         unload_btn.clicked.connect(on_unload)
 
         refresh()
+        return box
+
+    def _build_ocr_languages_section(self) -> QGroupBox:
+        """One checkable row per OCR recognizer language (Ф9.6): fully user-
+        driven, no language is favored over another beyond the shipped
+        default (ai/ocr_languages="eslav", preserving pre-Ф9.6 behavior).
+        Checking a not-yet-downloaded language auto-downloads it (queued one
+        at a time); unchecking only updates the selection, it never deletes
+        weights already on disk.
+        """
+        box = QGroupBox(self.tr("OCR languages"))
+        layout = QVBoxLayout(box)
+
+        list_widget = QListWidget()
+        codes = sorted(models.OCR_REC)  # deterministic order
+        selected = set(
+            config.parse_ocr_languages(str(config.get(self._settings, "ai/ocr_languages")))
+        )
+
+        status_label = QLabel()
+        progress = QProgressBar()
+        progress.setVisible(False)
+        warning_label = QLabel()
+        warning_label.setWordWrap(True)
+
+        items: dict[str, QListWidgetItem] = {}
+        for code in codes:
+            item = QListWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setData(Qt.ItemDataRole.UserRole, code)
+            item.setCheckState(
+                Qt.CheckState.Checked if code in selected else Qt.CheckState.Unchecked
+            )
+            list_widget.addItem(item)
+            items[code] = item
+        layout.addWidget(list_widget)
+        layout.addWidget(status_label)
+        layout.addWidget(progress)
+        layout.addWidget(warning_label)
+
+        queue: list[str] = []
+        state = {"downloading": None}  # currently-downloading code, or None
+
+        def item_status_text(code: str) -> str:
+            if code == state["downloading"]:
+                return self.tr("downloading...")
+            if models.is_downloaded(models.OCR_REC[code]):
+                return self.tr("downloaded")
+            return self.tr("not downloaded")
+
+        def refresh_item(code: str) -> None:
+            spec = models.OCR_REC[code]
+            base = f"{spec.label} ({models.human_size(spec.total_size_bytes)})"
+            # setText() on a QListWidgetItem fires itemChanged too, not just
+            # check-state edits -- without blocking, this programmatic refresh
+            # would re-enter on_item_changed() and could re-trigger a download
+            # (found live via the offscreen smoke test: refreshing the default
+            # checked-but-not-yet-downloaded item spuriously kicked off a real
+            # network fetch on construction).
+            list_widget.blockSignals(True)
+            items[code].setText(f"{base} — {item_status_text(code)}")
+            list_widget.blockSignals(False)
+
+        def refresh_warning() -> None:
+            warning_label.setVisible(len(selected) > 3)
+            if len(selected) > 3:
+                warning_label.setText(
+                    self.tr(
+                        "{n} languages selected: OCR runs a separate recognition pass "
+                        "per selected language for every detected text region, so more "
+                        "languages means proportionally slower OCR on each screenshot."
+                    ).format(n=len(selected))
+                )
+
+        def refresh_all() -> None:
+            for code in codes:
+                refresh_item(code)
+            refresh_warning()
+
+        def start_next_download() -> None:
+            if state["downloading"] is not None or not queue:
+                return
+            code = queue.pop(0)
+            state["downloading"] = code
+            refresh_item(code)
+            status_label.setText(
+                self.tr("Downloading {label}...").format(label=models.OCR_REC[code].label)
+            )
+            progress.setVisible(True)
+            progress.setValue(0)
+
+            signals = _DownloadSignals(self)
+            signals.progress.connect(
+                lambda done, total: progress.setValue(int(done / total * 100) if total else 0)
+            )
+            signals.finished.connect(
+                lambda ok, error, code=code: on_download_finished(code, ok, error)
+            )
+            QThreadPool.globalInstance().start(
+                _DownloadTask((models.OCR_DET, models.OCR_REC[code]), signals)
+            )
+
+        def on_download_finished(code: str, ok: bool, error: str) -> None:
+            state["downloading"] = None
+            progress.setVisible(False)
+            if ok:
+                status_label.setText(
+                    self.tr("Downloaded {label}").format(label=models.OCR_REC[code].label)
+                )
+                if self._ai_runtime is not None:
+                    self._ai_runtime.reset_ocr_engine()
+            else:
+                status_label.setText(self.tr("Download failed: {error}").format(error=error))
+            refresh_item(code)
+            start_next_download()
+
+        def on_item_changed(item: QListWidgetItem) -> None:
+            code = item.data(Qt.ItemDataRole.UserRole)
+            checked = item.checkState() == Qt.CheckState.Checked
+            if checked:
+                selected.add(code)
+            else:
+                selected.discard(code)
+            self._save(
+                "ai/ocr_languages",
+                config.format_ocr_languages([c for c in codes if c in selected]),
+            )
+            if self._ai_runtime is not None:
+                self._ai_runtime.reset_ocr_engine()
+            if (
+                checked
+                and not models.is_downloaded(models.OCR_REC[code])
+                and code != state["downloading"]
+                and code not in queue
+            ):
+                queue.append(code)
+                start_next_download()
+            refresh_all()
+
+        list_widget.itemChanged.connect(on_item_changed)
+        refresh_all()
         return box
 
     # -- Diagnostics & About ------------------------------------------------

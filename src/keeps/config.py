@@ -24,6 +24,12 @@ DEFAULTS: dict[str, bool | int | str] = {
     "ai/ocr_timing": "delayed",
     "ai/ocr_delay_seconds": 10,
     "ai/model_idle_unload_minutes": 10,
+    # Comma-joined language codes (keys of ai.models.OCR_REC), not a Python
+    # list: QSettings/INI has no clean round-trip for list-typed values, so
+    # this is stored as a plain string like every other DEFAULTS entry here.
+    # "eslav" alone reproduces today's shipped (pre-Ф9.6) behavior exactly --
+    # no bias toward any other language beyond preserving that default.
+    "ai/ocr_languages": "eslav",
 }
 
 
@@ -48,6 +54,26 @@ def open_settings() -> QSettings:
 def get(settings: QSettings, key: str):
     default = DEFAULTS[key]
     return settings.value(key, default, type=type(default))
+
+
+def parse_ocr_languages(value: str) -> list[str]:
+    """Comma-separated language codes -> a list: trimmed, empty entries
+    dropped, order preserved, de-duplicated (first occurrence wins).
+    """
+    codes: list[str] = []
+    seen: set[str] = set()
+    for raw in value.split(","):
+        code = raw.strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+    return codes
+
+
+def format_ocr_languages(codes: list[str]) -> str:
+    """Inverse of parse_ocr_languages: comma-join, no extra whitespace."""
+    return ",".join(codes)
 
 
 def apply_theme(theme: str) -> None:

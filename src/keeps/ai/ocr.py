@@ -1,18 +1,22 @@
-"""OCR: PP-OCRv5 two-stage pipeline (detector + East Slavic recognizer), CPU ONNX
-Runtime (PLAN.md §9). cv2/onnxruntime/numpy are imported lazily inside functions,
-not at module level.
+"""OCR: PP-OCRv5 two-stage pipeline (shared detector + one or more language
+recognizers), CPU ONNX Runtime (PLAN.md §9). cv2/onnxruntime/numpy are
+imported lazily inside functions, not at module level.
 
-Preprocess/postprocess parameters below are taken verbatim from the two models'
-own inference.yml (verified live against the Hugging Face repos on 2026-07-10,
-see PLAN.md §9) -- not guessed, not copied from an unrelated PP-OCR version.
+Preprocess/postprocess parameters below are taken verbatim from the models'
+own inference.yml (verified live against the Hugging Face repos on
+2026-07-10/2026-07-12, see PLAN.md §9) -- not guessed, not copied from an
+unrelated PP-OCR version. All PP-OCRv5 recognizers share the same detector
+and the same [3, 48, 320] recognition input shape; only the recognizer ONNX
+weights and CTC character dictionary differ per language group (Ф9.6).
 """
 
 from __future__ import annotations
 
-from functools import lru_cache
+from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
-DICT_PATH = Path(__file__).parent / "data" / "eslav_dict.txt"
+DATA_DIR = Path(__file__).parent / "data"
 
 # Detector (PaddlePaddle/PP-OCRv5_mobile_det_onnx, inference.yml).
 DET_RESIZE_LONG = 960
@@ -23,17 +27,25 @@ DET_BOX_THRESH = 0.6
 DET_UNCLIP_RATIO = 1.5
 DET_MIN_BOX_AREA = 16
 
-# Recognizer (PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx, inference.yml).
+# Recognizer input shape, identical across all PP-OCRv5 language groups
+# (PaddlePaddle/*_PP-OCRv5_mobile_rec_onnx, inference.yml).
 REC_HEIGHT = 48
 REC_BLANK_INDEX = 0
 
 
-@lru_cache(maxsize=1)
-def load_char_list() -> tuple[str, ...]:
-    """blank (index 0) + the 517-entry East Slavic dict + a trailing space,
+def dict_path_for(lang_code: str) -> Path:
+    """Path to the committed CTC character dictionary for a recognizer
+    language code (src/keeps/ai/data/<lang_code>_dict.txt)."""
+    return DATA_DIR / f"{lang_code}_dict.txt"
+
+
+@cache
+def load_char_list(dict_path: Path) -> tuple[str, ...]:
+    """blank (index 0) + the dict file's characters + a trailing space,
     matching PaddleOCR's standard CTCLabelDecode convention (`use_space_char`).
+    Cached per dict path -- a recognizer's dict never changes at runtime.
     """
-    chars = DICT_PATH.read_text(encoding="utf-8").splitlines()
+    chars = dict_path.read_text(encoding="utf-8").splitlines()
     return ("<blank>", *chars, " ")
 
 
@@ -54,6 +66,54 @@ def decode_indices(indices: list[int], char_list: tuple[str, ...]) -> str:
 
 def ctc_greedy_decode(class_ids: list[int], char_list: tuple[str, ...]) -> str:
     return decode_indices(ctc_collapse(class_ids), char_list)
+
+
+def ctc_greedy_decode_with_confidence(
+    logits, char_list: tuple[str, ...], blank_index: int = REC_BLANK_INDEX
+) -> tuple[str, float]:
+    """Like ctc_greedy_decode, but also returns a 0..1 confidence score --
+    the mean probability of the surviving (non-blank, de-duplicated) class
+    predictions, matching PaddleOCR's own CTCLabelDecode.decode():
+    `preds_idx = preds.argmax(axis=2)`, `preds_prob = preds.max(axis=2)`,
+    then `np.mean(conf_list)` over the positions kept after collapsing
+    consecutive duplicates (keeping the *first* timestep of each run) and
+    dropping blanks (verified against
+    ppocr/postprocess/rec_postprocess.py on the PaddleOCR GitHub repo).
+
+    `logits` is the raw `(seq_len, vocab_size)` array for one recognized box,
+    despite the name **not** re-normalized here: PP-OCRv5 recognizer ONNX
+    exports already end in a softmax layer -- verified live against the real
+    downloaded eslav weights (every per-timestep row of the raw ONNX output
+    summed to ~1.0, all non-negative, sharply peaked near 0.99+), matching
+    PaddleOCR's own decode which uses `preds.max(axis=2)` directly with no
+    separate softmax step. Applying softmax again here would double-normalize
+    an already-peaked distribution into near-uniform noise (confirmed with a
+    live smoke test: computed confidence collapsed to ~0.5% instead of the
+    true ~99.9% once a second softmax was removed) -- exactly the
+    guessed-instead-of-verified-math mistake this file has been burned by
+    twice before (see PLAN.md §9), so this was checked against real model
+    output rather than assumed either way.
+    Returns confidence 0.0 (not NaN/crash) if no characters survive.
+    """
+    import numpy as np
+
+    probs = np.asarray(logits, dtype=np.float64)
+    class_ids = np.argmax(probs, axis=-1).tolist()
+    step_probs = np.max(probs, axis=-1).tolist()
+
+    kept_ids: list[int] = []
+    kept_probs: list[float] = []
+    previous = None
+    for class_id, prob in zip(class_ids, step_probs):
+        if class_id != previous:  # first timestep of a new run
+            if class_id != blank_index:
+                kept_ids.append(class_id)
+                kept_probs.append(prob)
+        previous = class_id
+
+    text = decode_indices(kept_ids, char_list)
+    confidence = float(np.mean(kept_probs)) if kept_probs else 0.0
+    return text, confidence
 
 
 def _resize_for_detection(height: int, width: int, max_side: int = DET_RESIZE_LONG):
@@ -192,14 +252,43 @@ def _preprocess_recognition_crop(image_rgb, box):
     return np.expand_dims(np.transpose(normalized, (2, 0, 1)), axis=0)
 
 
-class OcrEngine:
-    """Lazy wrapper around the detector + recognizer ONNX sessions."""
+@dataclass(frozen=True)
+class RecognizerConfig:
+    """One configured language recognizer: its own ONNX weights and its own
+    CTC character dictionary (never interchangeable between recognizers).
+    """
 
-    def __init__(self, det_path: Path, rec_path: Path) -> None:
+    lang_code: str
+    rec_path: Path
+    dict_path: Path
+
+
+def _best_recognition(candidates: list[tuple[str, float]]) -> tuple[str, float]:
+    """Pick the (text, confidence) pair with the highest confidence.
+
+    Ties (including the single-candidate case) keep the first candidate,
+    i.e. the earliest recognizer in the configured list.
+    """
+    best_text, best_confidence = candidates[0]
+    for text, confidence in candidates[1:]:
+        if confidence > best_confidence:
+            best_text, best_confidence = text, confidence
+    return best_text, best_confidence
+
+
+class OcrEngine:
+    """Lazy wrapper around the shared detector session + one ONNX session per
+    configured recognizer.
+    """
+
+    def __init__(self, det_path: Path, recognizers: list[RecognizerConfig]) -> None:
+        if not recognizers:
+            raise ValueError("OcrEngine requires at least one recognizer")
         self._det_path = det_path
-        self._rec_path = rec_path
+        self._recognizers = recognizers
         self._det_session = None
-        self._rec_session = None
+        self._rec_sessions: dict[str, object] = {}
+        self._char_lists: dict[str, tuple[str, ...]] = {}
 
     @property
     def is_loaded(self) -> bool:
@@ -216,13 +305,16 @@ class OcrEngine:
         self._det_session = ort.InferenceSession(
             str(self._det_path), sess_options=options, providers=providers
         )
-        self._rec_session = ort.InferenceSession(
-            str(self._rec_path), sess_options=options, providers=providers
-        )
+        for recognizer in self._recognizers:
+            self._rec_sessions[recognizer.lang_code] = ort.InferenceSession(
+                str(recognizer.rec_path), sess_options=options, providers=providers
+            )
+            self._char_lists[recognizer.lang_code] = load_char_list(recognizer.dict_path)
 
     def unload(self) -> None:
         self._det_session = None
-        self._rec_session = None
+        self._rec_sessions = {}
+        self._char_lists = {}
 
     def extract_text(self, png_bytes: bytes) -> str:
         import cv2
@@ -239,14 +331,17 @@ class OcrEngine:
         (prob_map,) = self._det_session.run(None, {det_input_name: det_tensor})
         boxes = _postprocess_detection(prob_map, orig_shape, resized_shape)
 
-        char_list = load_char_list()
-        rec_input_name = self._rec_session.get_inputs()[0].name
         lines = []
         for box in boxes:
             rec_tensor = _preprocess_recognition_crop(image_rgb, box)
-            (logits,) = self._rec_session.run(None, {rec_input_name: rec_tensor})
-            class_ids = np.argmax(logits[0], axis=-1).tolist()
-            text = ctc_greedy_decode(class_ids, char_list)
+            candidates = []
+            for recognizer in self._recognizers:
+                session = self._rec_sessions[recognizer.lang_code]
+                rec_input_name = session.get_inputs()[0].name
+                (logits,) = session.run(None, {rec_input_name: rec_tensor})
+                char_list = self._char_lists[recognizer.lang_code]
+                candidates.append(ctc_greedy_decode_with_confidence(logits[0], char_list))
+            text, _confidence = _best_recognition(candidates)
             if text.strip():
                 lines.append(text)
         return "\n".join(lines)

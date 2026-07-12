@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
@@ -105,6 +106,27 @@ class _OcrTask(QRunnable):
         text = self._ocr_engine.extract_text(self._png_bytes)
         vec_bytes = self._embed_fn(text) if (self._embed_fn is not None and text.strip()) else None
         self._signals.finished.emit(self._clip_id, text, vec_bytes)
+
+
+def available_ocr_language_codes(
+    codes: list[str],
+    is_downloaded_fn: Callable[[models.ModelSpec], bool] = models.is_downloaded,
+) -> list[str]:
+    """Filter requested language codes (ai/ocr_languages, already parsed) down
+    to the ones that are both known (a key of models.OCR_REC) and currently
+    downloaded -- and only if the shared detector is downloaded too, since no
+    recognizer can run without it. Order is preserved from `codes`.
+
+    Pure logic, independent of AiRuntime/Qt, so it's directly unit-testable
+    without constructing a QCoreApplication.
+    """
+    if not is_downloaded_fn(models.OCR_DET):
+        return []
+    return [
+        code
+        for code in codes
+        if code in models.OCR_REC and is_downloaded_fn(models.OCR_REC[code])
+    ]
 
 
 class AiRuntime(QObject):
@@ -242,20 +264,58 @@ class AiRuntime(QObject):
     # -- OCR lifecycle (Model management) ------------------------------------
 
     def _get_ocr_engine(self):
-        if self._ocr_engine is None:
-            from keeps.ai.ocr import OcrEngine
+        """Build (and cache) the OcrEngine from the user's current language
+        selection (ai/ocr_languages) and what's actually downloaded on disk.
 
-            det = models.file_dest(models.OCR, models.OCR.files[0])
-            rec = models.file_dest(models.OCR, models.OCR.files[1])
-            self._ocr_engine = OcrEngine(det, rec)
+        Returns None if no selected language is usable yet (nothing
+        downloaded, or the user unchecked everything) -- OcrEngine itself
+        refuses to construct with zero recognizers. Callers must handle a
+        None return instead of assuming an engine is always available.
+        """
+        if self._ocr_engine is None:
+            codes = config.parse_ocr_languages(config.get(self._settings, "ai/ocr_languages"))
+            available = available_ocr_language_codes(codes)
+            if not available:
+                return None
+
+            from keeps.ai.ocr import OcrEngine, RecognizerConfig, dict_path_for
+
+            det = models.file_dest(models.OCR_DET, models.OCR_DET.files[0])
+            recognizers = [
+                RecognizerConfig(
+                    code,
+                    models.file_dest(models.OCR_REC[code], models.OCR_REC[code].files[0]),
+                    dict_path_for(code),
+                )
+                for code in available
+            ]
+            self._ocr_engine = OcrEngine(det, recognizers)
         return self._ocr_engine
+
+    def reset_ocr_engine(self) -> None:
+        """Drop the cached OcrEngine so the next _get_ocr_engine() call
+        rebuilds it from the current config selection + on-disk state.
+
+        Called by Settings > AI whenever the language selection changes or a
+        download finishes, so newly enabled/downloaded languages take effect
+        immediately, no daemon restart needed (matching every other setting
+        in this app).
+        """
+        if self._ocr_engine is not None:
+            self._ocr_engine.unload()
+        self._ocr_engine = None
 
     def ocr_status(self) -> models.ModelStatus:
         loaded = self._ocr_engine is not None and self._ocr_engine.is_loaded
-        return models.status(models.OCR, loaded=loaded)
+        codes = config.parse_ocr_languages(config.get(self._settings, "ai/ocr_languages"))
+        if not available_ocr_language_codes(codes):
+            return models.ModelStatus.NOT_DOWNLOADED
+        return models.ModelStatus.LOADED if loaded else models.ModelStatus.DOWNLOADED
 
     def load_ocr_engine(self) -> None:
-        self._get_ocr_engine().load()
+        engine = self._get_ocr_engine()
+        if engine is not None:
+            engine.load()
 
     def unload_ocr_engine(self) -> None:
         if self._ocr_engine is not None:
@@ -327,6 +387,8 @@ class AiRuntime(QObject):
         if png_bytes is None:
             return
         engine = self._get_ocr_engine()
+        if engine is None:
+            return
         embed_fn = self.embed_text if self.rag_text_enabled else None
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)

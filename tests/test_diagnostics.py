@@ -102,10 +102,11 @@ def test_check_ocr_model_not_downloaded(tmp_path, monkeypatch):
 
 def test_check_ocr_model_downloaded(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    for f in models.OCR.files:
-        dest = models.file_dest(models.OCR, f)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"0" * f.size_bytes)
+    for spec in (models.OCR_DET, models.OCR_REC["eslav"]):
+        for f in spec.files:
+            dest = models.file_dest(spec, f)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"0" * f.size_bytes)
 
     assert check_ocr_model().ok is True
 

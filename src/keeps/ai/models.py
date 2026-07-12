@@ -124,9 +124,9 @@ TEXT_EMBED = ModelSpec(
     ),
 )
 
-OCR = ModelSpec(
-    name="ocr-ppocrv5-eslav",
-    label="OCR (PP-OCRv5, East Slavic RU/UK/BE/BG + EN)",
+OCR_DET = ModelSpec(
+    name="ocr-det",
+    label="OCR text detector (shared by all languages)",
     files=(
         ModelFile(
             repo="PaddlePaddle/PP-OCRv5_mobile_det_onnx",
@@ -134,11 +134,159 @@ OCR = ModelSpec(
             sha256="a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d",
             size_bytes=4_826_518,
         ),
-        ModelFile(
-            repo="PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx",
-            path_in_repo="inference.onnx",
-            sha256="b3018ef2b09a0250b6e0c8e871c927098363e5fd4df890cc68e8358eb0aaf1bd",
-            size_bytes=7_887_627,
-        ),
     ),
 )
+
+# One PP-OCRv5 recognizer per language group (verified live against Hugging
+# Face on 2026-07-12): each has its own ONNX weights AND its own CTC
+# character dictionary (src/keeps/ai/data/<code>_dict.txt) -- they are not
+# interchangeable. All share the OCR_DET detector above and the same
+# [3, 48, 320] input shape. Which of these are active is fully up to the
+# user (Settings > AI > OCR languages, ai/ocr_languages, Ф9.6) -- "eslav"
+# alone is only the shipped default, preserving pre-Ф9.6 behavior.
+OCR_REC: dict[str, ModelSpec] = {
+    "ch": ModelSpec(
+        name="ocr-rec-ch",
+        label="OCR recognizer: Chinese, English, Japanese",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="da72dc72ca4dc220df0dfde68c1dedc31c58d3e76a25871122e5056227d50092",
+                size_bytes=16_534_782,
+            ),
+        ),
+    ),
+    "en": ModelSpec(
+        name="ocr-rec-en",
+        label="OCR recognizer: English (optimized)",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="b5f833dfc5d0eb71da397b4efa06ebeee9b431b690a47d6af40d77d8eabc557f",
+                size_bytes=7_848_423,
+            ),
+        ),
+    ),
+    "eslav": ModelSpec(
+        name="ocr-rec-eslav",
+        label="OCR recognizer: East Slavic (Russian, Belarusian, Ukrainian) + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="b3018ef2b09a0250b6e0c8e871c927098363e5fd4df890cc68e8358eb0aaf1bd",
+                size_bytes=7_887_627,
+            ),
+        ),
+    ),
+    "cyrillic": ModelSpec(
+        name="ocr-rec-cyrillic",
+        label="OCR recognizer: Cyrillic-script languages (RU, UK, BG, KK, and ~10 more) + EN",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/cyrillic_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="5371ee1ddaa7983cc62d0818d99e982b6804638c85e4f960d59a574094e172e5",
+                size_bytes=8_048_799,
+            ),
+        ),
+    ),
+    "latin": ModelSpec(
+        name="ocr-rec-latin",
+        label="OCR recognizer: Latin-script languages (FR, DE, ES, IT, PL, and ~40 more) + EN",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498",
+                size_bytes=8_042_023,
+            ),
+        ),
+    ),
+    "korean": ModelSpec(
+        name="ocr-rec-korean",
+        label="OCR recognizer: Korean + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08",
+                size_bytes=13_418_787,
+            ),
+        ),
+    ),
+    "th": ModelSpec(
+        name="ocr-rec-th",
+        label="OCR recognizer: Thai + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/th_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="27618be66018f8598ac0a526a593f9f1cebf794e7eded93428e8fb016e537f5f",
+                size_bytes=7_891_015,
+            ),
+        ),
+    ),
+    "el": ModelSpec(
+        name="ocr-rec-el",
+        label="OCR recognizer: Greek + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/el_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="2acf17fcaea2bc81b878e311e6263b8885f48bb03796f75f9f30ed3242bbaa6d",
+                size_bytes=7_808_735,
+            ),
+        ),
+    ),
+    "arabic": ModelSpec(
+        name="ocr-rec-arabic",
+        label="OCR recognizer: Arabic, Persian, Urdu, and 6 more Arabic-script languages + EN",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/arabic_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="799113ebf267fbe742deb99eb36e8d42c9ddc5291ceacf92add41b4d52a59110",
+                size_bytes=7_998_947,
+            ),
+        ),
+    ),
+    "devanagari": ModelSpec(
+        name="ocr-rec-devanagari",
+        label="OCR recognizer: Hindi, Marathi, Nepali, Sanskrit, and related Indic scripts + EN",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/devanagari_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="cb789212ce96c69d3e74728ae4309d179281d68cb3945d0616b67cafab41c986",
+                size_bytes=7_912_311,
+            ),
+        ),
+    ),
+    "ta": ModelSpec(
+        name="ocr-rec-ta",
+        label="OCR recognizer: Tamil + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/ta_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="c6d2b682d2a0ea4cb1fccdba295976f93fd439964d16cdc666cadef531accbee",
+                size_bytes=7_885_691,
+            ),
+        ),
+    ),
+    "te": ModelSpec(
+        name="ocr-rec-te",
+        label="OCR recognizer: Telugu + English",
+        files=(
+            ModelFile(
+                repo="PaddlePaddle/te_PP-OCRv5_mobile_rec_onnx",
+                path_in_repo="inference.onnx",
+                sha256="8238bfc46d4cffe720ed6706e3842802467343497428693ff2bfb4e6b3caa36b",
+                size_bytes=7_898_759,
+            ),
+        ),
+    ),
+}

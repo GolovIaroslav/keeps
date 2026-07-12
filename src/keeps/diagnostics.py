@@ -79,7 +79,13 @@ def check_klipper(runner: Callable[..., subprocess.CompletedProcess]) -> Check:
 
 
 def check_ocr_model() -> Check:
-    downloaded = models.is_downloaded(models.OCR)
+    # OCR needs the shared detector plus at least one language recognizer
+    # downloaded to be usable at all (Ф9.6: which recognizer(s) are actually
+    # selected is a per-language ai/ocr_languages setting, read via QSettings
+    # in Settings > AI -- kept out of this Qt-free module on purpose).
+    downloaded = models.is_downloaded(models.OCR_DET) and any(
+        models.is_downloaded(spec) for spec in models.OCR_REC.values()
+    )
     detail = "downloaded" if downloaded else "optional: download in Settings > AI to enable OCR"
     return Check("OCR model (PP-OCRv5)", downloaded, detail)
 
