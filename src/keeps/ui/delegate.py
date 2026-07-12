@@ -90,6 +90,27 @@ class ClipItemDelegate(QStyledItemDelegate):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 painter.drawPixmap(rect.left(), rect.top(), pixmap)
+            if clip.ocr_text and clip.ocr_text.strip():
+                original_font = painter.font()
+                badge_font = painter.font()
+                badge_font.setPointSize(max(1, option.font.pointSize() - 2))
+                badge_metrics = QFontMetrics(badge_font)
+                badge_width = badge_metrics.horizontalAdvance("OCR") + 4
+                badge_height = badge_metrics.height() + 2
+                badge_rect = QRect(
+                    rect.left() + thumbnail_size - badge_width,
+                    rect.top() + thumbnail_size - badge_height,
+                    badge_width,
+                    badge_height,
+                )
+                painter.setFont(badge_font)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(option.palette.highlight())
+                painter.drawRect(badge_rect)
+                painter.setPen(option.palette.highlightedText().color())
+                painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, "OCR")
+                painter.setFont(original_font)
+                painter.setPen(text_color)
             rect.setLeft(rect.left() + thumbnail_size + padding)
 
         if clip.pinned:

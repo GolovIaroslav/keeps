@@ -505,6 +505,8 @@ class PopupWindow(QWidget):
         menu.addAction(
             self.tr("Copy"), lambda: self._activate(row, plain_only=False, want_paste=False)
         )
+        if clip.kind == "image" and clip.ocr_text and clip.ocr_text.strip():
+            menu.addAction(self.tr("Copy recognized text"), lambda: self._copy_ocr_text(row))
         menu.addSeparator()
         menu.addAction(self.tr("View"), self._view_current)
         pin_label = self.tr("Unpin") if clip.pinned else self.tr("Pin")
@@ -524,6 +526,12 @@ class PopupWindow(QWidget):
 
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
 
+    def _copy_ocr_text(self, row: int) -> None:
+        clip = self.model.clip_at(row)
+        self._set_clipboard({"text/plain": clip.ocr_text.encode("utf-8")}, plain_only=True)
+        self.store.touch(clip.id)
+        self.hide()
+
     def _special_paste(self, row: int, transform) -> None:
         """Paste a transformed copy of a clip's plain text without touching storage.
 
@@ -532,8 +540,8 @@ class PopupWindow(QWidget):
         call), same as the source clip content shown in the list afterwards.
         """
         clip = self.model.clip_at(row)
-        plain = self.store.get_data(clip.id).get("text/plain", b"").decode(
-            "utf-8", errors="replace"
+        plain = (
+            self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
         )
         transformed = transform(plain)
         self._set_clipboard({"text/plain": transformed.encode("utf-8")}, plain_only=True)

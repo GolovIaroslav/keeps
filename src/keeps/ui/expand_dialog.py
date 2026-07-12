@@ -34,6 +34,12 @@ class ViewDialog(QDialog):
 
         if clip.kind == "image":
             layout.addWidget(self._build_image_label(mime_data))
+            if clip.ocr_text and clip.ocr_text.strip():
+                ocr_view = QPlainTextEdit()
+                ocr_view.setPlainText(clip.ocr_text)
+                ocr_view.setReadOnly(True)
+                ocr_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+                layout.addWidget(ocr_view)
         else:
             layout.addWidget(self._build_text_view(clip, mime_data))
 
