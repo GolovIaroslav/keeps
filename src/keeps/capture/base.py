@@ -113,15 +113,18 @@ def build_bundle(
 
     Returns None if no known kind is offered, or the content exceeds max_item_mb.
     """
-    html_bytes = reader(MIME_HTML) if MIME_HTML in available else None
-    kind = detect_kind(available, html_bytes)
+    kind = detect_kind(available)
     if kind is None:
         return None
     if kind == "html":
-        assert html_bytes is not None
-        bundle = {MIME_HTML: html_bytes}
-        if MIME_PLAIN in available:
-            bundle[MIME_PLAIN] = reader(MIME_PLAIN)
+        html_bytes = reader(MIME_HTML)
+        kind = detect_kind(available, html_bytes)
+        if kind == "html":
+            bundle = {MIME_HTML: html_bytes}
+            if MIME_PLAIN in available:
+                bundle[MIME_PLAIN] = reader(MIME_PLAIN)
+        else:
+            bundle = select_bundle(kind, available, reader)
     else:
         bundle = select_bundle(kind, available, reader)
     if not bundle:

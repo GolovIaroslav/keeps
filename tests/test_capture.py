@@ -118,6 +118,33 @@ def test_build_bundle_downgrades_unformatted_html_without_rereading_it():
     assert reads == [MIME_HTML, MIME_PLAIN]
 
 
+@pytest.mark.parametrize(
+    ("available", "expected_kind", "expected_reads"),
+    [
+        ({MIME_IMAGE, MIME_HTML, MIME_PLAIN}, "image", [MIME_IMAGE]),
+        (
+            {MIME_URI_LIST, MIME_HTML, MIME_PLAIN},
+            "files",
+            [MIME_URI_LIST, MIME_PLAIN],
+        ),
+    ],
+)
+def test_build_bundle_does_not_read_html_when_higher_priority_kind_wins(
+    available, expected_kind, expected_reads
+):
+    reads = []
+
+    def reader(mime: str) -> bytes:
+        reads.append(mime)
+        return b"payload-" + mime.encode()
+
+    result = build_bundle(available, reader)
+
+    assert result is not None
+    assert result[0] == expected_kind
+    assert reads == expected_reads
+
+
 def test_build_bundle_unknown_kind_returns_none():
     assert build_bundle(set(), lambda mime: b"") is None
 
