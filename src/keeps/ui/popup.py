@@ -24,7 +24,7 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication, QImage, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QGuiApplication, QIcon, QImage, QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListView,
     QMenu,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -43,9 +44,14 @@ from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
 from keeps.ui.expand_dialog import EditDialog, ViewDialog
+from keeps.ui.settings import SettingsDialog
 
 SEARCH_DEBOUNCE_MS = 50
 DEFAULT_SIZE = QSize(420, 480)
+
+# Ф9.4: thin drag handle at the top of the popup, since a frameless window
+# has no native title bar to grab -- see _TitleBar below.
+_TITLE_BAR_HEIGHT = 22
 
 # Frameless windows have no native resize grip; this is both the hit-test
 # margin for drag-resize (mousePressEvent/mouseMoveEvent below) and the
@@ -201,6 +207,31 @@ class _PasteInjectionTask(QRunnable):
             paste.notify_paste_unavailable(self._backend, shutil.which)
 
 
+class _TitleBar(QWidget):
+    """Thin drag handle at the top of the popup (Ф9.4).
+
+    A frameless window has no native title bar to grab, so this widget's own
+    mousePressEvent starts a compositor-driven move -- the same
+    startSystemMove/startSystemResize mechanism PopupWindow's own
+    mousePressEvent already uses for edge drag-resize. The settings button is
+    a proper child widget and consumes its own press before it would reach
+    here, so clicking it just clicks rather than starting a window drag.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(_TITLE_BAR_HEIGHT)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        window = self.window().windowHandle()
+        if event.button() == Qt.MouseButton.LeftButton and window is not None:
+            if window.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class PopupWindow(QWidget):
     # Emitted after a clip is copied to the clipboard with paste intent
     # (Enter/Shift+Enter/Ctrl+1..9); connected below to the actual
@@ -255,10 +286,22 @@ class PopupWindow(QWidget):
         search_row.addWidget(self.search_edit)
         search_row.addWidget(self._mode_badge)
 
+        self._title_bar = _TitleBar(self)
+        title_bar_layout = QHBoxLayout(self._title_bar)
+        title_bar_layout.setContentsMargins(2, 0, 2, 0)
+        title_bar_layout.addStretch(1)
+        settings_button = QToolButton(self._title_bar)
+        settings_button.setIcon(QIcon.fromTheme("configure"))
+        settings_button.setToolTip(self.tr("Settings..."))
+        settings_button.setAutoRaise(True)
+        settings_button.clicked.connect(self._open_settings)
+        title_bar_layout.addWidget(settings_button)
+
         layout = QVBoxLayout(self)
         # Matches _RESIZE_MARGIN so the drag-resize hit-test ring is never
         # covered by a child widget (search_edit/list_view).
         layout.setContentsMargins(*([_RESIZE_MARGIN] * 4))
+        layout.addWidget(self._title_bar)
         layout.addLayout(search_row)
         layout.addWidget(self.list_view)
 
@@ -537,6 +580,11 @@ class PopupWindow(QWidget):
         self.store.delete(clip.id)
         self.refresh()
         self._select_row(min(row, self.model.rowCount() - 1))
+
+    def _open_settings(self) -> None:
+        # Mirrors app.py's on_settings_requested (tray path) exactly, so
+        # Settings behaves identically whether opened from the tray or here.
+        SettingsDialog(self._ai_runtime).exec()
 
     def _cycle_search_mode(self) -> None:
         if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
