@@ -208,6 +208,38 @@ def test_clips_missing_ocr_lists_only_image_clips_without_ocr_text(store):
     assert store.clips_missing_ocr() == [without_ocr]
 
 
+def test_thumbnail_roundtrip_and_backlog_only_include_missing_images(store):
+    with_thumbnail = store.add("image", {"image/png": PNG_1X1})
+    other_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])
+    without_thumbnail = store.add("image", {"image/png": other_png})
+    store.add("text", {"text/plain": b"not an image"})
+
+    assert store.get_thumbnail(with_thumbnail) is None
+    assert store.clips_missing_thumbnail() == [with_thumbnail, without_thumbnail]
+
+    assert store.set_thumbnail(with_thumbnail, b"small-png") is True
+
+    assert store.get_thumbnail(with_thumbnail) == b"small-png"
+    assert store.clips_missing_thumbnail() == [without_thumbnail]
+
+
+def test_thumbnail_write_after_clip_deletion_is_ignored(store):
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.delete(clip_id)
+
+    assert store.set_thumbnail(clip_id, b"late-worker-result") is False
+    assert store.get_thumbnail(clip_id) is None
+
+
+def test_deleting_clip_cascades_to_thumbnail(store):
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_thumbnail(clip_id, b"small-png")
+
+    store.delete(clip_id)
+
+    assert store.get_thumbnail(clip_id) is None
+
+
 def test_clips_missing_embedding_lists_only_text_and_html_without_it(store):
     embedded = store.add("text", {"text/plain": b"already embedded"})
     store.set_embedding(embedded, "model-x", b"vec")

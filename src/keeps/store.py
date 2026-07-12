@@ -312,6 +312,23 @@ class Store:
         ).fetchall()
         return {row["mime"]: row["data"] for row in rows}
 
+    def set_thumbnail(self, clip_id: int, png: bytes) -> bool:
+        """Store an image thumbnail; return False if its clip no longer exists."""
+        cur = self._conn.execute(
+            "INSERT INTO thumbs (clip_id, png) "
+            "SELECT id, ? FROM clips WHERE id = ? AND kind = 'image' "
+            "ON CONFLICT(clip_id) DO UPDATE SET png = excluded.png",
+            (png, clip_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def get_thumbnail(self, clip_id: int) -> bytes | None:
+        row = self._conn.execute(
+            "SELECT png FROM thumbs WHERE clip_id = ?", (clip_id,)
+        ).fetchone()
+        return row["png"] if row is not None else None
+
     def search(self, query: str) -> list[Clip]:
         """In-memory, casefold-based filter (SQLite LIKE breaks on Cyrillic).
 
@@ -352,6 +369,16 @@ class Store:
         """Image-clip ids with no ocr_text yet -- used for the OCR backlog sweep."""
         rows = self._conn.execute(
             "SELECT id FROM clips WHERE kind = 'image' AND ocr_text IS NULL"
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def clips_missing_thumbnail(self) -> list[int]:
+        """Image-clip ids without a generated thumbnail, for the startup sweep."""
+        rows = self._conn.execute(
+            "SELECT c.id FROM clips c "
+            "LEFT JOIN thumbs t ON t.clip_id = c.id "
+            "WHERE c.kind = 'image' AND t.clip_id IS NULL "
+            "ORDER BY c.id"
         ).fetchall()
         return [row["id"] for row in rows]
 
