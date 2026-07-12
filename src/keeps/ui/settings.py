@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 from keeps import __version__, autostart, config, diagnostics
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
+from keeps.store import Store
 
 ABOUT_HTML = """\
 <h3>Keeps {version}</h3>
@@ -110,11 +112,17 @@ class _DownloadTask(QRunnable):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, ai_runtime: AiRuntime | None = None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        ai_runtime: AiRuntime | None = None,
+        store: Store | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(self.tr("Keeps Settings"))
         self._settings = config.open_settings()
         self._ai_runtime = ai_runtime
+        self._store = store
 
         tabs = QTabWidget(self)
         tabs.addTab(self._build_general_tab(), self.tr("General"))
@@ -544,19 +552,22 @@ class SettingsDialog(QDialog):
         return widget
 
     def _build_db_info_group(self) -> QGroupBox:
-        """DB path/size + trim explanation (PLAN.md §9.5). Computed fresh here,
-        which runs once per dialog construction, so values can't go stale
-        across dialog opens the way a value cached at import time would.
+        """DB path/size + trim explanation (PLAN.md §9.5) + Ф10 maintenance
+        buttons (Backup now / Compact / Clear history). Size is computed
+        fresh here so it can't go stale across dialog opens the way a value
+        cached at import time would.
         """
         group = QGroupBox(self.tr("Database"))
         form = QFormLayout(group)
 
-        db_path = config.default_db_path()
-        size_bytes = db_path.stat().st_size if db_path.exists() else 0
+        db_path = self._store.db_path if self._store is not None else config.default_db_path()
         path_label = QLabel(str(db_path))
         path_label.setWordWrap(True)
         form.addRow(self.tr("Path"), path_label)
-        form.addRow(self.tr("Size"), QLabel(models.human_size(size_bytes)))
+
+        self._db_size_label = QLabel()
+        form.addRow(self.tr("Size"), self._db_size_label)
+        self._refresh_db_size_label()
 
         max_items = int(config.get(self._settings, "general/max_items"))
         cleanup_label = QLabel(
@@ -569,7 +580,64 @@ class SettingsDialog(QDialog):
         cleanup_label.setWordWrap(True)
         form.addRow(cleanup_label)
 
+        if self._store is not None:
+            button_row = QHBoxLayout()
+            backup_button = QPushButton(self.tr("Backup now"))
+            backup_button.clicked.connect(self._on_backup_now)
+            compact_button = QPushButton(self.tr("Compact (VACUUM)"))
+            compact_button.clicked.connect(self._on_compact)
+            clear_button = QPushButton(self.tr("Clear history…"))
+            clear_button.clicked.connect(self._on_clear_history)
+            button_row.addWidget(backup_button)
+            button_row.addWidget(compact_button)
+            button_row.addWidget(clear_button)
+            form.addRow(button_row)
+
         return group
+
+    def _refresh_db_size_label(self) -> None:
+        db_path = self._store.db_path if self._store is not None else config.default_db_path()
+        size_bytes = db_path.stat().st_size if db_path.exists() else 0
+        self._db_size_label.setText(models.human_size(size_bytes))
+
+    def _on_backup_now(self) -> None:
+        backup_path = self._store.backup_now()
+        QMessageBox.information(
+            self,
+            self.tr("Backup created"),
+            self.tr("Saved to:\n{path}").format(path=backup_path),
+        )
+
+    def _on_compact(self) -> None:
+        before, after = self._store.compact()
+        QMessageBox.information(
+            self,
+            self.tr("Compact complete"),
+            self.tr("Size before: {before}\nSize after: {after}").format(
+                before=models.human_size(before), after=models.human_size(after)
+            ),
+        )
+        self._refresh_db_size_label()
+
+    def _on_clear_history(self) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.tr("Clear history"))
+        box.setText(self.tr("Delete all clips? This cannot be undone."))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        include_pinned_box = QCheckBox(self.tr("Also delete pinned clips"))
+        box.setCheckBox(include_pinned_box)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = self._store.clear_history(include_pinned=include_pinned_box.isChecked())
+        QMessageBox.information(
+            self,
+            self.tr("History cleared"),
+            self.tr("{count} clip(s) deleted.").format(count=deleted),
+        )
+        self._refresh_db_size_label()
 
     def _refresh_diagnostics(self) -> None:
         self._diagnostics_list.clear()

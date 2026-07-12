@@ -584,7 +584,7 @@ class PopupWindow(QWidget):
     def _open_settings(self) -> None:
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
         # Settings behaves identically whether opened from the tray or here.
-        SettingsDialog(self._ai_runtime).exec()
+        SettingsDialog(self._ai_runtime, self._store).exec()
         # Qt doesn't reliably restore focus to search_edit after a modal
         # dialog closes; _handle_key only fires for events targeting
         # search_edit specifically, so without this the whole keymap

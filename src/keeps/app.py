@@ -209,7 +209,7 @@ def _run_daemon(show_immediately: bool) -> int:
     tray.capture_paused_changed.connect(on_capture_paused_changed)
 
     def on_settings_requested() -> None:
-        SettingsDialog(ai_runtime).exec()
+        SettingsDialog(ai_runtime, store).exec()
 
     tray.settings_requested.connect(on_settings_requested)
 
