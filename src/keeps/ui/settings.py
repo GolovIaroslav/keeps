@@ -163,6 +163,16 @@ class SettingsDialog(QDialog):
         hotkey.editingFinished.connect(lambda: self._save("general/hotkey", hotkey.text()))
         form.addRow(self.tr("Hotkey (restart to apply)"), hotkey)
 
+        for key, label in (
+            ("general/external_editor_text", self.tr("External editor — text")),
+            ("general/external_editor_html", self.tr("External editor — HTML")),
+            ("general/external_editor_image", self.tr("External editor — images")),
+        ):
+            editor = QLineEdit(str(config.get(self._settings, key)))
+            editor.setPlaceholderText(self.tr("xdg-open (system default)"))
+            editor.editingFinished.connect(lambda k=key, e=editor: self._save(k, e.text()))
+            form.addRow(label, editor)
+
         theme_combo = QComboBox()
         theme_combo.addItems(["system", "light", "dark"])
         theme_combo.setCurrentText(str(config.get(self._settings, "general/theme")))

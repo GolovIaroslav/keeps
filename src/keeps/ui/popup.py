@@ -77,10 +77,10 @@ _EDGE_CURSORS = {
     frozenset({"bottom", "left"}): Qt.CursorShape.SizeBDiagCursor,
 }
 
-# Ctrl+E scope decision (Ф3): only plain "text" clips are editable in an
-# external editor for now — editing html/image/files has no clean semantics
-# yet (see implementation-notes.md).
+# F2's built-in editor remains text-only; Ctrl+E's external editor supports
+# the three content kinds that have a corresponding file representation.
 EDITABLE_KINDS = {"text"}
+EXTERNAL_EDIT_KINDS = {"text", "html", "image"}
 
 _NAV_KEYS = {
     Qt.Key.Key_Up,
@@ -317,7 +317,7 @@ class PopupWindow(QWidget):
 
         self._edit_watcher = QFileSystemWatcher(self)
         self._edit_watcher.fileChanged.connect(self._on_edited_file_changed)
-        self._edit_sessions: dict[str, int] = {}
+        self._edit_sessions: dict[str, tuple[int, str]] = {}
 
         self._settings = config.open_settings()
         size = self._settings.value("popup/size")
@@ -514,7 +514,7 @@ class PopupWindow(QWidget):
         builtin_edit_action = menu.addAction(self.tr("Edit"), self._edit_builtin_current)
         builtin_edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
         edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
-        edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
+        edit_action.setEnabled(clip.kind in EXTERNAL_EDIT_KINDS)
         menu.addAction(self.tr("Delete"), self._delete_current)
 
         plain_text = self.store.get_data(clip.id).get("text/plain")
@@ -722,23 +722,46 @@ class PopupWindow(QWidget):
         if row is None:
             return
         clip = self.model.clip_at(row)
-        if clip.kind not in EDITABLE_KINDS:
+        if clip.kind not in EXTERNAL_EDIT_KINDS:
             return
-        text = self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
-        fd, path = tempfile.mkstemp(prefix="keeps-edit-", suffix=".txt")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        self._edit_sessions[path] = clip.id
+        suffixes = {"text": ".txt", "html": ".html", "image": ".png"}
+        mime_types = {"text": "text/plain", "html": "text/html", "image": "image/png"}
+        mime_data = self.store.get_data(clip.id)
+        source = mime_data.get(mime_types[clip.kind], b"")
+        fd, path = tempfile.mkstemp(prefix="keeps-edit-", suffix=suffixes[clip.kind])
+        if clip.kind == "text":
+            text = source.decode("utf-8", errors="replace")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        else:
+            with os.fdopen(fd, "wb") as f:
+                f.write(source)
+        self._edit_sessions[path] = (clip.id, clip.kind)
         self._edit_watcher.addPath(path)
-        subprocess.Popen(["xdg-open", path])
+        editor_key = f"general/external_editor_{clip.kind}"
+        configured_editor = str(config.get(self._settings, editor_key)).strip()
+        subprocess.Popen([configured_editor or "xdg-open", path])
 
     def _on_edited_file_changed(self, path: str) -> None:
-        clip_id = self._edit_sessions.get(path)
-        if clip_id is None or not os.path.exists(path):
+        session = self._edit_sessions.get(path)
+        if session is None or not os.path.exists(path):
             return
-        with open(path, encoding="utf-8") as f:
-            new_text = f.read()
-        self.store.update_content(clip_id, {"text/plain": new_text.encode("utf-8")})
+        clip_id, kind = session
+        if kind == "text":
+            with open(path, encoding="utf-8") as f:
+                new_text = f.read()
+            self.store.update_content(clip_id, {"text/plain": new_text.encode("utf-8")})
+        else:
+            with open(path, "rb") as f:
+                new_bytes = f.read()
+            if kind == "image":
+                self.store.update_content(clip_id, {"image/png": new_bytes})
+            else:
+                mime_data = self.store.get_data(clip_id).copy()
+                # Preserve the plain-text fallback; deriving it from edited
+                # HTML is out of scope.
+                mime_data["text/html"] = new_bytes
+                self.store.update_content(clip_id, mime_data)
         self.refresh()
         if path not in self._edit_watcher.files():
             self._edit_watcher.addPath(path)  # some editors atomic-save (rm+recreate)
