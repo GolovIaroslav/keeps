@@ -120,18 +120,20 @@ class ClipListModel(QAbstractListModel):
         self._clips: list[Clip] = []
         self._current_query = ""
         self._semantic_scores: dict[int, int] = {}
-        # Ф9.3: id of the clip most recently *pasted* (not merely copied),
-        # highlighted by the delegate until the next paste. Session-local,
-        # not persisted; survives _rebuild() since it lives outside
+        # Ф9.3: ids of every clip *pasted* (not merely copied) this popup
+        # session, all highlighted by the delegate simultaneously (user
+        # request 2026-07-12: pasting several different clips in a row should
+        # keep all of them marked, not just the most recent one). Session-
+        # local, not persisted; survives _rebuild() since it lives outside
         # self._clips and is looked up by id, never by row index.
-        self._last_pasted_id: int | None = None
+        self._pasted_ids: set[int] = set()
 
     @property
-    def last_pasted_id(self) -> int | None:
-        return self._last_pasted_id
+    def pasted_ids(self) -> frozenset[int]:
+        return frozenset(self._pasted_ids)
 
-    def set_last_pasted(self, clip_id: int) -> None:
-        self._last_pasted_id = clip_id
+    def mark_pasted(self, clip_id: int) -> None:
+        self._pasted_ids.add(clip_id)
 
     def set_query(self, query: str) -> None:
         self._current_query = query
@@ -477,7 +479,7 @@ class PopupWindow(QWidget):
         transformed = transform(plain)
         self._set_clipboard({"text/plain": transformed.encode("utf-8")}, plain_only=True)
         self.store.touch(clip.id)
-        self.model.set_last_pasted(clip.id)
+        self.model.mark_pasted(clip.id)
         self.hide()
         self.paste_requested.emit(clip.id, True)
 
@@ -490,7 +492,7 @@ class PopupWindow(QWidget):
         self.store.touch(clip.id)
         self.hide()
         if want_paste:
-            self.model.set_last_pasted(clip.id)
+            self.model.mark_pasted(clip.id)
             self.paste_requested.emit(clip.id, plain_only)
 
     @staticmethod

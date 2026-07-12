@@ -17,7 +17,7 @@ THUMBNAIL_SIZE = 40
 MAX_PREVIEW_LINES = 3
 PADDING = 6
 NUMBER_BADGE_COUNT = 9  # matches Ctrl+1..9
-LAST_PASTED_BORDER_WIDTH = 2  # Ф9.3: border around the most recently pasted row
+PASTED_BORDER_WIDTH = 2  # Ф9.3: border around every clip pasted this popup session
 
 
 class ClipItemDelegate(QStyledItemDelegate):
@@ -58,9 +58,9 @@ class ClipItemDelegate(QStyledItemDelegate):
         painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
         painter.setPen(text_color)
 
-        if clip.id == index.model().last_pasted_id:
+        if clip.id in index.model().pasted_ids:
             border_pen = QPen(option.palette.highlight().color())
-            border_pen.setWidth(LAST_PASTED_BORDER_WIDTH)
+            border_pen.setWidth(PASTED_BORDER_WIDTH)
             painter.setPen(border_pen)
             painter.drawRect(option.rect.adjusted(1, 1, -2, -2))
             painter.setPen(text_color)
