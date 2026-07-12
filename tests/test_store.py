@@ -421,7 +421,7 @@ def test_pre_migration_db_gets_stamped_without_losing_data_or_backing_up(tmp_pat
     conn.close()
 
     assert [c.preview for c in clips] == ["pre-existing clip"]
-    assert version == 1
+    assert version == store_module.LATEST_VERSION
     assert list(tmp_path.glob("*.backup-*")) == []
 
 
@@ -436,8 +436,8 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     def add_dummy_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN dummy TEXT")
 
-    monkeypatch.setattr(store_module, "LATEST_VERSION", 2)
-    monkeypatch.setattr(store_module, "MIGRATIONS", {2: add_dummy_column})
+    monkeypatch.setattr(store_module, "LATEST_VERSION", 3)
+    monkeypatch.setattr(store_module, "MIGRATIONS", {3: add_dummy_column})
 
     s2 = Store(db_path, max_items=500)
     clips = s2.all()
@@ -449,10 +449,66 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     conn.close()
 
     assert [c.preview for c in clips] == ["before migration"]
-    assert version == 2
+    assert version == 3
     assert "dummy" in columns
     backups = list(tmp_path.glob("keeps.db.backup-*"))
     assert len(backups) == 1
+
+
+def test_v1_migration_adds_groups_and_manual_order_with_backup(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store_module.SCHEMA)
+    conn.execute("PRAGMA user_version = 1")
+    conn.execute(
+        "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
+        "VALUES (0, 0, 'text', 'survives', 'h', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(db_path)
+    clip = migrated.all()[0]
+    migrated.close()
+
+    conn = sqlite3.connect(db_path)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    conn.close()
+    assert version == 2
+    assert {"group_id", "manual_order"} <= columns
+    assert "groups" in tables
+    assert clip.preview == "survives" and clip.group_id is None
+    assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
+
+
+def test_group_lifecycle_returns_clips_to_history(store):
+    clip_id = store.add("text", {"text/plain": b"grouped"})
+    group_id = store.create_group("Work")
+    store.set_group_many([clip_id], group_id)
+
+    assert [group.name for group in store.groups()] == ["Work"]
+    assert [clip.id for clip in store.clips_in_scope(f"group:{group_id}")] == [clip_id]
+
+    store.rename_group(group_id, "Projects")
+    assert store.groups()[0].name == "Projects"
+    store.delete_group(group_id)
+    assert store.groups() == []
+    assert store.all()[0].group_id is None
+
+
+def test_manual_order_is_scoped_and_history_order_never_changes(store):
+    oldest = store.add("text", {"text/plain": b"oldest"})
+    middle = store.add("text", {"text/plain": b"middle"})
+    newest = store.add("text", {"text/plain": b"newest"})
+    store.set_pinned_many([oldest, middle, newest], True)
+    history_before = [clip.id for clip in store.all()]
+
+    store.move_manual(oldest, "pinned", -1)
+
+    assert [clip.id for clip in store.all()] == history_before
+    assert [clip.id for clip in store.clips_in_scope("pinned")] == [newest, oldest, middle]
 
 
 def test_backup_now_creates_a_restorable_copy(tmp_path):

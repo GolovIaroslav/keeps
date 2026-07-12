@@ -49,9 +49,27 @@ PREVIEW_MAX_CHARS = 300
 # Schema version history (PLAN.md §5/Ф10). SCHEMA above (CREATE TABLE IF NOT
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
-# entries for v2 and beyond. First real migration lands in Ф14 (groups).
-LATEST_VERSION = 1
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {}
+# entries for v2 and beyond.
+LATEST_VERSION = 2
+
+
+def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
+    """Add flat groups plus the shared manual order used by scoped tabs."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    if "group_id" not in columns:
+        conn.execute(
+            "ALTER TABLE clips ADD COLUMN group_id INTEGER REFERENCES groups(id) "
+            "ON DELETE SET NULL"
+        )
+    if "manual_order" not in columns:
+        conn.execute("ALTER TABLE clips ADD COLUMN manual_order REAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS groups ("
+        "id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL)"
+    )
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {2: _migrate_v2_groups}
 
 BACKUP_KEEP = 3
 
@@ -89,6 +107,15 @@ class Clip:
     pinned: bool
     use_count: int
     ocr_text: str | None
+    group_id: int | None = None
+    manual_order: float | None = None
+
+
+@dataclass(frozen=True)
+class Group:
+    id: int
+    name: str
+    sort_order: int
 
 
 def normalize(text: str) -> str:
@@ -167,9 +194,11 @@ class Store:
             # whether it's brand new or predates this migration system
             # entirely -- so no real migration ran and no backup is needed
             # just to stamp the version.
-            self._conn.execute("PRAGMA user_version = 1")
+            for target in range(2, LATEST_VERSION + 1):
+                MIGRATIONS[target](self._conn)
+            self._conn.execute(f"PRAGMA user_version = {LATEST_VERSION}")
             self._conn.commit()
-            version = 1
+            version = LATEST_VERSION
         if version >= LATEST_VERSION:
             return
         backup_database(self._db_path, self._conn)
@@ -406,6 +435,89 @@ class Store:
         ).fetchall()
         return [self._row_to_clip(row) for row in rows]
 
+    def groups(self) -> list[Group]:
+        rows = self._conn.execute(
+            "SELECT id, name, sort_order FROM groups ORDER BY sort_order, id"
+        ).fetchall()
+        return [Group(row["id"], row["name"], row["sort_order"]) for row in rows]
+
+    def clips_in_scope(self, scope: str, clips: list[Clip] | None = None) -> list[Clip]:
+        clips = self.all() if clips is None else clips
+        if scope == "history":
+            return clips
+        if scope == "pinned":
+            scoped = [clip for clip in clips if clip.pinned]
+        elif scope.startswith("group:"):
+            group_id = int(scope.partition(":")[2])
+            scoped = [clip for clip in clips if clip.group_id == group_id]
+        else:
+            raise ValueError(f"unknown scope: {scope}")
+        history_position = {clip.id: position for position, clip in enumerate(clips)}
+        return sorted(
+            scoped,
+            key=lambda clip: (
+                clip.manual_order is None,
+                clip.manual_order if clip.manual_order is not None else 0,
+                history_position[clip.id],
+            ),
+        )
+
+    def create_group(self, name: str) -> int:
+        name = name.strip()
+        if not name:
+            raise ValueError("group name cannot be empty")
+        next_order = self._conn.execute(
+            "SELECT coalesce(max(sort_order), -1) + 1 FROM groups"
+        ).fetchone()[0]
+        cur = self._conn.execute(
+            "INSERT INTO groups (name, sort_order) VALUES (?, ?)", (name, next_order)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def rename_group(self, group_id: int, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("group name cannot be empty")
+        self._conn.execute("UPDATE groups SET name = ? WHERE id = ?", (name, group_id))
+        self._conn.commit()
+
+    def delete_group(self, group_id: int) -> None:
+        self._conn.execute("UPDATE clips SET group_id = NULL WHERE group_id = ?", (group_id,))
+        self._conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+        self._conn.commit()
+
+    def set_group_many(self, clip_ids: list[int], group_id: int | None) -> None:
+        self._conn.executemany(
+            "UPDATE clips SET group_id = ?, manual_order = NULL WHERE id = ?",
+            [(group_id, clip_id) for clip_id in dict.fromkeys(clip_ids)],
+        )
+        self._conn.commit()
+
+    def move_manual(self, clip_id: int, scope: str, direction: int) -> None:
+        if scope == "pinned":
+            where, params = "pinned = 1", ()
+        elif scope.startswith("group:"):
+            where, params = "group_id = ?", (int(scope.partition(":")[2]),)
+        else:
+            raise ValueError("manual order is only available in pinned/group scopes")
+        rows = self._conn.execute(
+            f"SELECT id FROM clips WHERE {where} "
+            "ORDER BY manual_order IS NULL, manual_order, last_used_at DESC, id DESC",
+            params,
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        index = ids.index(clip_id)
+        target = max(0, min(len(ids) - 1, index + direction))
+        if target == index:
+            return
+        ids[index], ids[target] = ids[target], ids[index]
+        self._conn.executemany(
+            "UPDATE clips SET manual_order = ? WHERE id = ?",
+            [(position, item_id) for position, item_id in enumerate(ids)],
+        )
+        self._conn.commit()
+
     def get_data(self, clip_id: int) -> dict[str, bytes]:
         rows = self._conn.execute(
             "SELECT mime, data FROM clip_data WHERE clip_id = ?", (clip_id,)
@@ -514,4 +626,6 @@ class Store:
             pinned=bool(row["pinned"]),
             use_count=row["use_count"],
             ocr_text=row["ocr_text"],
+            group_id=row["group_id"],
+            manual_order=row["manual_order"],
         )
