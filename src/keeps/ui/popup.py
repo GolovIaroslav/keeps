@@ -387,6 +387,13 @@ class PopupWindow(QWidget):
 
     def refresh(self) -> None:
         self.model.set_query(self.search_edit.text())
+        self._prune_thumbnail_cache()
+
+    def on_clip_captured(self, _clip_id: int, _kind: str) -> None:
+        """Drop cached pixmaps for clips removed by Store.trim() during capture."""
+        self._prune_thumbnail_cache()
+
+    def _prune_thumbnail_cache(self) -> None:
         self._delegate.prune_thumbnail_cache({clip.id for clip in self.store.all()})
 
     def on_thumbnail_ready(self, clip_id: int) -> None:

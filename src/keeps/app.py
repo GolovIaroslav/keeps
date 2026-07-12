@@ -168,7 +168,6 @@ def _run_daemon(show_immediately: bool) -> int:
     thumbnail_runtime = ThumbnailRuntime(store)
     watcher.clip_added.connect(ai_runtime.on_clip_captured)
     watcher.clip_added.connect(thumbnail_runtime.on_clip_captured)
-    watcher.start()
     if ai_runtime.ocr_enabled:
         ai_runtime.run_ocr_backlog_sweep()
     if ai_runtime.rag_text_enabled:
@@ -177,7 +176,9 @@ def _run_daemon(show_immediately: bool) -> int:
     popup = PopupWindow(store, ai_runtime)
     thumbnail_runtime.thumbnail_ready.connect(popup.on_thumbnail_ready)
     popup.thumbnail_requested.connect(thumbnail_runtime.on_clip_captured)
+    watcher.clip_added.connect(popup.on_clip_captured)
     thumbnail_runtime.run_backlog_sweep()
+    watcher.start()
 
     socket_path = _socket_path()
     QLocalServer.removeServer(socket_path)  # drop a stale socket from a crashed instance
