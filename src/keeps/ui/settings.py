@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from keeps import __version__, autostart, config, diagnostics
+from keeps import __version__, autostart, config, diagnostics, multi_paste
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.store import Store
@@ -50,16 +50,18 @@ HOTKEYS_HTML = """\
 <tr><td>typing text</td><td>filter the list live</td></tr>
 <tr><td>&uarr;/&darr;, PgUp/PgDn</td>
     <td>navigate (from the search field, arrows move the list)</td></tr>
-<tr><td>Enter / double-click</td><td>paste the selected item (any format)</td></tr>
-<tr><td>Shift+Enter</td><td>paste as plain text</td></tr>
-<tr><td>Ctrl+C</td><td>copy to clipboard only, no paste</td></tr>
-<tr><td>Del</td><td>delete the item</td></tr>
+<tr><td>Ctrl+A</td><td>select all visible search results</td></tr>
+<tr><td>Enter / double-click</td>
+    <td>paste the selected item; multiple items are joined as plain text</td></tr>
+<tr><td>Shift+Enter</td><td>paste as plain text (also used for multiple items)</td></tr>
+<tr><td>Ctrl+C</td><td>copy the selected item(s) to the clipboard only, no paste</td></tr>
+<tr><td>Del</td><td>delete the selected item(s); asks for confirmation above 5</td></tr>
 <tr><td>Ctrl+E</td>
     <td>edit externally (xdg-open on a temp file; saving updates the clip)</td></tr>
 <tr><td>F3</td>
     <td>View: expand the selected item read-only (full text or full-size image)</td></tr>
 <tr><td>F2</td><td>Edit: built-in editor (text clips only)</td></tr>
-<tr><td>Ctrl+P</td><td>pin/unpin</td></tr>
+<tr><td>Ctrl+P</td><td>pin/unpin the selected item(s)</td></tr>
 <tr><td>Ctrl+1..9</td><td>paste the Nth visible item (first 9 are numbered)</td></tr>
 <tr><td>Ctrl+M</td><td>cycle search mode (blended/keywords/meaning) &mdash;
     only when semantic search is enabled</td></tr>
@@ -69,9 +71,10 @@ HOTKEYS_HTML = """\
 </table>
 <p>The popup window can be dragged from its title bar and resized from any edge or corner.</p>
 <p>Right-click menu: paste, paste as text, copy, View (F3), pin/unpin, Edit (F2, built-in,
-text clips only), Edit externally (Ctrl+E), delete. Plus a <b>Special Paste</b> submenu
-(text clips only): UPPERCASE / lowercase / Capitalize / Trim whitespace &mdash; pastes a
-transformed copy without changing the stored clip; menu-only, no dedicated shortcut.</p>
+text clips only), Edit externally (Ctrl+E), delete. Paste/copy/pin/delete act on the whole
+selection; View and editing require one item. Plus a <b>Special Paste</b> submenu (one text
+clip only): UPPERCASE / lowercase / Capitalize / Trim whitespace &mdash; pastes a transformed
+copy without changing the stored clip; menu-only, no dedicated shortcut.</p>
 """
 
 
@@ -197,6 +200,38 @@ class SettingsDialog(QDialog):
             lambda v: self._save("popup/keep_search_after_paste", v)
         )
         form.addRow(self.tr("Keep search after paste"), keep_search)
+
+        multi_separator = QLineEdit(
+            multi_paste.separator_to_display(
+                str(config.get(self._settings, "paste/multi_separator"))
+            )
+        )
+        multi_separator.setToolTip(self.tr(r"Use \n for a line break and \t for a tab"))
+        multi_separator.editingFinished.connect(
+            lambda: self._save(
+                "paste/multi_separator",
+                multi_paste.separator_from_display(multi_separator.text()),
+            )
+        )
+        form.addRow(self.tr("Multi-paste separator"), multi_separator)
+
+        reverse_multi = QCheckBox()
+        reverse_multi.setChecked(
+            bool(config.get(self._settings, "paste/multi_reverse_order"))
+        )
+        reverse_multi.toggled.connect(
+            lambda v: self._save("paste/multi_reverse_order", v)
+        )
+        form.addRow(self.tr("Reverse multi-paste order"), reverse_multi)
+
+        save_multi = QCheckBox()
+        save_multi.setChecked(
+            bool(config.get(self._settings, "paste/save_multi_as_clip"))
+        )
+        save_multi.toggled.connect(
+            lambda v: self._save("paste/save_multi_as_clip", v)
+        )
+        form.addRow(self.tr("Save combined paste as a new clip"), save_multi)
 
         delay = QSpinBox()
         delay.setRange(0, 5000)

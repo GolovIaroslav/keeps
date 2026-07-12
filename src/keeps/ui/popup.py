@@ -32,12 +32,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListView,
     QMenu,
+    QMessageBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from keeps import config, paste
+from keeps import config, multi_paste, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.search import MatchReason, remember_query
@@ -331,6 +332,7 @@ class PopupWindow(QWidget):
         self._delegate = ClipItemDelegate(store, self.list_view)
         self.list_view.setItemDelegate(self._delegate)
         self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.list_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_view.doubleClicked.connect(self._on_double_clicked)
         self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -491,6 +493,14 @@ class PopupWindow(QWidget):
         index = self.list_view.currentIndex()
         return index.row() if index.isValid() else None
 
+    def _selected_rows(self) -> list[int]:
+        selection_model = self.list_view.selectionModel()
+        return sorted(index.row() for index in selection_model.selectedRows())
+
+    def _single_selected_row(self) -> int | None:
+        rows = self._selected_rows()
+        return rows[0] if len(rows) == 1 else None
+
     # -- keymap (PLAN.md §6), paste injection itself is Ф4 -----------------
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
@@ -528,18 +538,25 @@ class PopupWindow(QWidget):
         if key in _NAV_KEYS:
             QCoreApplication.sendEvent(self.list_view, event)
             return True
+        if ctrl and key == Qt.Key.Key_A:
+            self.list_view.selectAll()
+            return True
         if key == Qt.Key.Key_Escape:
             self.hide()
             return True
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            row = self._current_row()
-            if row is not None:
-                self._activate(row, plain_only=shift, want_paste=True)
+            rows = self._selected_rows()
+            if len(rows) > 1:
+                self._activate_many(rows, want_paste=True)
+            elif rows:
+                self._activate(rows[0], plain_only=shift, want_paste=True)
             return True
         if ctrl and key == Qt.Key.Key_C:
-            row = self._current_row()
-            if row is not None:
-                self._activate(row, plain_only=False, want_paste=False)
+            rows = self._selected_rows()
+            if len(rows) > 1:
+                self._activate_many(rows, want_paste=False)
+            elif rows:
+                self._activate(rows[0], plain_only=False, want_paste=False)
             return True
         if key == Qt.Key.Key_Delete:
             self._delete_current()
@@ -583,34 +600,47 @@ class PopupWindow(QWidget):
         if not index.isValid():
             return
         row = index.row()
-        self._select_row(row)  # right-click on a non-selected row selects it first
+        selected_rows = self._selected_rows()
+        if row not in selected_rows:
+            self.list_view.clearSelection()
+            self._select_row(row)
+            selected_rows = [row]
+        clips = [self.model.clip_at(selected_row) for selected_row in selected_rows]
         clip = self.model.clip_at(row)
+        multi = len(selected_rows) > 1
 
         menu = QMenu(self.list_view)
         menu.addAction(
-            self.tr("Paste"), lambda: self._activate(row, plain_only=False, want_paste=True)
+            self.tr("Paste"),
+            lambda: self._activate_selection(selected_rows, plain_only=False, want_paste=True),
         )
         menu.addAction(
             self.tr("Paste as text"),
-            lambda: self._activate(row, plain_only=True, want_paste=True),
+            lambda: self._activate_selection(selected_rows, plain_only=True, want_paste=True),
         )
         menu.addAction(
-            self.tr("Copy"), lambda: self._activate(row, plain_only=False, want_paste=False)
+            self.tr("Copy"),
+            lambda: self._activate_selection(selected_rows, plain_only=False, want_paste=False),
         )
-        if clip.kind == "image" and clip.ocr_text and clip.ocr_text.strip():
+        if not multi and clip.kind == "image" and clip.ocr_text and clip.ocr_text.strip():
             menu.addAction(self.tr("Copy recognized text"), lambda: self._copy_ocr_text(row))
         menu.addSeparator()
-        menu.addAction(self.tr("View"), self._view_current)
-        pin_label = self.tr("Unpin") if clip.pinned else self.tr("Pin")
-        menu.addAction(pin_label, self._toggle_pin_current)
+        view_action = menu.addAction(self.tr("View"), self._view_current)
+        view_action.setEnabled(not multi)
+        pin_target = not all(selected_clip.pinned for selected_clip in clips)
+        pin_label = self.tr("Pin") if pin_target else self.tr("Unpin")
+        menu.addAction(
+            pin_label,
+            lambda: self._set_pinned_rows(selected_rows, pin_target),
+        )
         builtin_edit_action = menu.addAction(self.tr("Edit"), self._edit_builtin_current)
-        builtin_edit_action.setEnabled(clip.kind in EDITABLE_KINDS)
+        builtin_edit_action.setEnabled(not multi and clip.kind in EDITABLE_KINDS)
         edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
-        edit_action.setEnabled(clip.kind in EXTERNAL_EDIT_KINDS)
-        menu.addAction(self.tr("Delete"), self._delete_current)
+        edit_action.setEnabled(not multi and clip.kind in EXTERNAL_EDIT_KINDS)
+        menu.addAction(self.tr("Delete"), lambda: self._delete_rows(selected_rows))
 
-        plain_text = self.store.get_data(clip.id).get("text/plain")
-        if plain_text:
+        plain_text = self.store.get_data(clip.id).get("text/plain") if not multi else None
+        if plain_text is not None:
             menu.addSeparator()
             special_menu = menu.addMenu(self.tr("Special Paste"))
             for label, transform in text_transform.TRANSFORMS.items():
@@ -646,6 +676,54 @@ class PopupWindow(QWidget):
         self.paste_requested.emit(clip.id, True)
 
     # -- actions -------------------------------------------------------------
+
+    def _activate_selection(
+        self, rows: list[int], plain_only: bool, want_paste: bool
+    ) -> None:
+        if len(rows) > 1:
+            self._activate_many(rows, want_paste)
+        elif rows:
+            self._activate(rows[0], plain_only, want_paste)
+
+    def _activate_many(self, rows: list[int], want_paste: bool) -> None:
+        selected = [
+            (self.model.clip_at(row).id, self.store.get_data(self.model.clip_at(row).id))
+            for row in rows
+        ]
+        result = multi_paste.combine_plain_text(
+            selected,
+            str(config.get(self._settings, "paste/multi_separator")),
+            reverse=bool(config.get(self._settings, "paste/multi_reverse_order")),
+        )
+        if not result.clip_ids:
+            QMessageBox.warning(
+                self,
+                self.tr("Nothing to paste"),
+                self.tr("The selection contains no plain-text content."),
+            )
+            return
+        if result.skipped_count:
+            QMessageBox.warning(
+                self,
+                self.tr("Some clips were skipped"),
+                self.tr("{count} clip(s) without plain text were skipped.").format(
+                    count=result.skipped_count
+                ),
+            )
+        combined_data = {"text/plain": result.text.encode("utf-8")}
+        self._set_clipboard(combined_data, plain_only=True)
+        self.store.touch_many(list(result.clip_ids))
+        if config.get(self._settings, "paste/save_multi_as_clip"):
+            self.store.add("text", combined_data)
+        if want_paste:
+            for clip_id in result.clip_ids:
+                self.model.mark_pasted(clip_id)
+            self._preserve_search_once = bool(
+                config.get(self._settings, "popup/keep_search_after_paste")
+            )
+        self.hide()
+        if want_paste:
+            self.paste_requested.emit(result.clip_ids[0], True)
 
     def _activate(self, row: int, plain_only: bool, want_paste: bool) -> None:
         clip = self.model.clip_at(row)
@@ -696,14 +774,28 @@ class PopupWindow(QWidget):
         QThreadPool.globalInstance().start(_PasteInjectionTask(backend))
 
     def _delete_current(self) -> None:
-        row = self._current_row()
-        if row is None:
+        rows = self._selected_rows()
+        if not rows:
             return
-        clip = self.model.clip_at(row)
-        self._delegate.invalidate_thumbnail(clip.id)
-        self.store.delete(clip.id)
+        self._delete_rows(rows)
+
+    def _delete_rows(self, rows: list[int]) -> None:
+        if len(rows) > 5:
+            answer = QMessageBox.question(
+                self,
+                self.tr("Delete clips"),
+                self.tr("Delete {count} selected clips?").format(count=len(rows)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        clip_ids = [self.model.clip_at(row).id for row in rows]
+        for clip_id in clip_ids:
+            self._delegate.invalidate_thumbnail(clip_id)
+        self.store.delete_many(clip_ids)
         self.refresh()
-        self._select_row(min(row, self.model.rowCount() - 1))
+        self._select_row(min(rows[0], self.model.rowCount() - 1))
 
     def _open_settings(self) -> None:
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
@@ -784,17 +876,21 @@ class PopupWindow(QWidget):
         super().mousePressEvent(event)
 
     def _toggle_pin_current(self) -> None:
-        row = self._current_row()
-        if row is None:
+        rows = self._selected_rows()
+        if not rows:
             return
-        clip = self.model.clip_at(row)
-        self.store.set_pinned(clip.id, not clip.pinned)
+        clips = [self.model.clip_at(row) for row in rows]
+        self._set_pinned_rows(rows, not all(clip.pinned for clip in clips))
+
+    def _set_pinned_rows(self, rows: list[int], pinned: bool) -> None:
+        clip_ids = [self.model.clip_at(row).id for row in rows]
+        self.store.set_pinned_many(clip_ids, pinned)
         self.refresh()
-        self._select_row(min(row, self.model.rowCount() - 1))
+        self._select_row(min(rows[0], self.model.rowCount() - 1))
 
     def _view_current(self) -> None:
         """F3, any kind: read-only expand (Ditto's "View Full Description")."""
-        row = self._current_row()
+        row = self._single_selected_row()
         if row is None:
             return
         clip = self.model.clip_at(row)
@@ -805,7 +901,7 @@ class PopupWindow(QWidget):
     def _edit_builtin_current(self) -> None:
         """F2, text clips only: built-in modal editor (distinct from Ctrl+E/_edit_current,
         which shells out to an external editor and is unrelated/unchanged)."""
-        row = self._current_row()
+        row = self._single_selected_row()
         if row is None:
             return
         clip = self.model.clip_at(row)
@@ -819,7 +915,7 @@ class PopupWindow(QWidget):
         self.search_edit.setFocus()
 
     def _edit_current(self) -> None:
-        row = self._current_row()
+        row = self._single_selected_row()
         if row is None:
             return
         clip = self.model.clip_at(row)
