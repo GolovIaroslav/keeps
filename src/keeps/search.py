@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
-from keeps.store import normalize
+from keeps.store import normalize, normalize_with_mapping
 
 CONTENT_LIMIT_BYTES = 10 * 1024
 SEARCH_HISTORY_LIMIT = 20
@@ -119,9 +119,9 @@ class SearchIndex:
         if document is None or reason == MatchReason.SEMANTIC:
             return None
         source = document.content if reason == MatchReason.EXACT else document.ocr
-        normalized_source = normalize(source)
+        normalized_source, original_indexes = normalize_with_mapping(source)
         positions = [
-            normalized_source.find(normalize(term))
+            original_indexes[normalized_source.find(normalize(term))]
             for term in query.split()
             if normalize(term) in normalized_source
         ]

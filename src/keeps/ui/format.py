@@ -4,18 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from keeps.store import normalize
+from keeps.store import normalize, normalize_with_mapping
 
 
 def highlight_ranges(text: str, query: str) -> list[tuple[int, int]]:
     """Original-string ranges for every case-insensitive query-term occurrence."""
-    folded_parts = []
-    original_indexes = []
-    for index, character in enumerate(text):
-        folded = normalize(character)
-        folded_parts.append(folded)
-        original_indexes.extend([index] * len(folded))
-    folded_text = "".join(folded_parts)
+    folded_text, original_indexes = normalize_with_mapping(text)
 
     ranges = set()
     for raw_term in query.split():

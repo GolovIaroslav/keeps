@@ -20,6 +20,15 @@ def test_search_finds_text_beyond_preview_limit(index):
     assert "hidden needle" in snippet
 
 
+def test_snippet_offsets_survive_casefold_expansion(index):
+    content = ("ß" * 200 + " hidden needle").encode()
+    index.upsert(1, "text", {"text/plain": content})
+
+    snippet = index.snippet(1, "needle", MatchReason.EXACT)
+
+    assert "hidden needle" in snippet
+
+
 def test_search_requires_every_word_in_any_order(index):
     index.upsert(1, "text", {"text/plain": b"alpha middle beta"})
     index.upsert(2, "text", {"text/plain": b"alpha only"})

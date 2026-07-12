@@ -96,6 +96,17 @@ def normalize(text: str) -> str:
     return text.casefold()
 
 
+def normalize_with_mapping(text: str) -> tuple[str, list[int]]:
+    """Casefold text and map each folded character back to its original index."""
+    folded_parts = []
+    original_indexes = []
+    for index, character in enumerate(text):
+        folded = normalize(character)
+        folded_parts.append(folded)
+        original_indexes.extend([index] * len(folded))
+    return "".join(folded_parts), original_indexes
+
+
 def _canonical_bytes(kind: str, mime_data: dict[str, bytes]) -> bytes:
     """Bytes used to compute the dedup hash, per kind (see PLAN.md §5)."""
     if kind == "text":
