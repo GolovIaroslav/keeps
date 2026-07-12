@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from keeps.search import CONTENT_LIMIT_BYTES, MatchReason, SearchIndex
+from keeps.search import CONTENT_LIMIT_BYTES, MatchReason, SearchIndex, remember_query
 
 
 @pytest.fixture
@@ -92,3 +92,17 @@ def test_search_5000_ten_kib_documents_is_under_50ms():
 
     assert results == {4242: MatchReason.EXACT}
     assert elapsed < 0.05, f"full-content search took {elapsed * 1000:.1f}ms"
+
+
+def test_remember_query_deduplicates_case_insensitively_and_caps_at_twenty():
+    history = [f"query {index}" for index in range(20)]
+
+    updated = remember_query(history, "  QUERY 5  ")
+
+    assert updated[0] == "QUERY 5"
+    assert updated.count("query 5") == 0
+    assert len(updated) == 20
+
+
+def test_remember_query_ignores_blank_query():
+    assert remember_query(["kept"], "   ") == ["kept"]

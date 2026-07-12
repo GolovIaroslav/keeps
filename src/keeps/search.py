@@ -10,11 +10,23 @@ from urllib.parse import unquote, urlparse
 from keeps.store import normalize
 
 CONTENT_LIMIT_BYTES = 10 * 1024
+SEARCH_HISTORY_LIMIT = 20
 
 
 class MatchReason(StrEnum):
     EXACT = "exact"
     OCR = "ocr"
+
+
+def remember_query(
+    history: list[str], query: str, limit: int = SEARCH_HISTORY_LIMIT
+) -> list[str]:
+    query = query.strip()
+    if not query:
+        return list(history)
+    query_key = normalize(query)
+    previous = [item for item in history if normalize(item) != query_key]
+    return [query, *previous][:limit]
 
 
 @dataclass(frozen=True)

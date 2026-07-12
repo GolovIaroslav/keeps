@@ -189,6 +189,15 @@ class SettingsDialog(QDialog):
         paste_enabled.toggled.connect(lambda v: self._save("paste/enabled", v))
         form.addRow(self.tr("Auto-paste after selecting"), paste_enabled)
 
+        keep_search = QCheckBox()
+        keep_search.setChecked(
+            bool(config.get(self._settings, "popup/keep_search_after_paste"))
+        )
+        keep_search.toggled.connect(
+            lambda v: self._save("popup/keep_search_after_paste", v)
+        )
+        form.addRow(self.tr("Keep search after paste"), keep_search)
+
         delay = QSpinBox()
         delay.setRange(0, 5000)
         delay.setSuffix(" ms")

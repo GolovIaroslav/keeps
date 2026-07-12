@@ -18,6 +18,7 @@ DEFAULTS: dict[str, bool | int | str] = {
     "general/external_editor_image": "",
     "paste/delay_ms": 150,
     "paste/enabled": True,
+    "popup/keep_search_after_paste": False,
     "capture/store_html": True,
     "capture/store_images": True,
     "capture/store_files": True,

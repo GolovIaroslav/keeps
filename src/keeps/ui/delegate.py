@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
-from PySide6.QtGui import QFontMetrics, QPen, QPixmap, QPixmapCache
+from PySide6.QtCore import QModelIndex, QPointF, QRect, QSize, Qt
+from PySide6.QtGui import (
+    QFont,
+    QFontMetrics,
+    QPen,
+    QPixmap,
+    QPixmapCache,
+    QTextCharFormat,
+    QTextLayout,
+    QTextOption,
+)
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from keeps.store import Store
-from keeps.ui.format import relative_time
+from keeps.ui.format import highlight_ranges, relative_time
 
 KIND_LABELS = {"text": "TXT", "html": "HTML", "image": "IMG", "files": "FILES"}
 
@@ -64,6 +73,54 @@ class ClipItemDelegate(QStyledItemDelegate):
         QPixmapCache.insert(cache_key, pixmap)
         self._thumbnail_cache_keys[clip_id] = cache_key
         return pixmap
+
+    @staticmethod
+    def _draw_highlighted_preview(painter, option, rect: QRect, text: str, query: str) -> None:
+        ranges = highlight_ranges(text, query)
+        if not ranges:
+            painter.drawText(
+                rect,
+                int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft),
+                text,
+            )
+            return
+
+        highlight_format = QTextCharFormat()
+        if option.state & QStyle.StateFlag.State_Selected:
+            highlight_format.setBackground(option.palette.base())
+            highlight_format.setForeground(option.palette.text())
+        else:
+            highlight_format.setBackground(option.palette.highlight())
+            highlight_format.setForeground(option.palette.highlightedText())
+        highlight_format.setFontWeight(QFont.Weight.Bold)
+
+        formats = []
+        for start, length in ranges:
+            format_range = QTextLayout.FormatRange()
+            format_range.start = start
+            format_range.length = length
+            format_range.format = highlight_format
+            formats.append(format_range)
+
+        layout = QTextLayout(text, option.font)
+        text_option = QTextOption()
+        text_option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(text_option)
+        layout.setFormats(formats)
+        layout.beginLayout()
+        y = 0.0
+        for _ in range(MAX_PREVIEW_LINES):
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(rect.width())
+            line.setPosition(QPointF(0, y))
+            y += line.height()
+        layout.endLayout()
+        painter.save()
+        painter.setClipRect(rect)
+        layout.draw(painter, QPointF(rect.left(), rect.top()))
+        painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         metrics = QFontMetrics(option.font)
@@ -147,7 +204,12 @@ class ClipItemDelegate(QStyledItemDelegate):
             rect.setRight(rect.right() - 14)
 
         age = relative_time(clip.last_used_at, int(time.time() * 1000))
-        meta = f"{KIND_LABELS.get(clip.kind, clip.kind.upper())} · {age}"
+        meta_parts = [KIND_LABELS.get(clip.kind, clip.kind.upper())]
+        match_reason = index.model().match_reason(clip.id)
+        if match_reason:
+            meta_parts.append(f"[{match_reason}]")
+        meta_parts.append(age)
+        meta = " · ".join(meta_parts)
         painter.drawText(
             QRect(rect.left(), rect.top(), rect.width(), line_height),
             Qt.AlignmentFlag.AlignRight,
@@ -157,9 +219,11 @@ class ClipItemDelegate(QStyledItemDelegate):
         preview_rect = QRect(
             rect.left(), rect.top() + line_height, rect.width(), line_height * MAX_PREVIEW_LINES
         )
-        painter.drawText(
+        self._draw_highlighted_preview(
+            painter,
+            option,
             preview_rect,
-            int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft),
             clip.preview,
+            index.model().current_query,
         )
         painter.restore()

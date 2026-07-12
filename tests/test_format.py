@@ -1,6 +1,6 @@
 import pytest
 
-from keeps.ui.format import relative_time
+from keeps.ui.format import highlight_ranges, relative_time
 
 NOW = 1_000_000_000_000  # arbitrary fixed "now" in unix ms
 
@@ -24,3 +24,17 @@ def test_relative_time_far_past_is_a_date():
     eight_days_ms = 8 * 86400 * 1000
     result = relative_time(NOW - eight_days_ms, NOW)
     assert result.count("-") == 2  # YYYY-MM-DD, not a relative phrase
+
+
+@pytest.mark.parametrize(
+    ("text", "query", "expected"),
+    [
+        ("alpha middle beta", "BETA alpha", [(0, 5), (13, 4)]),
+        ("Привет, мир", "МИР", [(8, 3)]),
+        ("banana", "ana", [(1, 3), (3, 3)]),
+        ("no match", "missing", []),
+        ("anything", "   ", []),
+    ],
+)
+def test_highlight_ranges(text, query, expected):
+    assert highlight_ranges(text, query) == expected

@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from keeps import config, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
+from keeps.search import remember_query
 from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
@@ -125,7 +126,8 @@ class ClipListModel(QAbstractListModel):
         self._ai_runtime = ai_runtime
         self._clips: list[Clip] = []
         self._current_query = ""
-        self._semantic_scores: dict[int, int] = {}
+        self._semantic_scores: dict[int, float] = {}
+        self._match_reasons: dict[int, str] = {}
         # Ф9.3: ids of every clip *pasted* (not merely copied) this popup
         # session, all highlighted by the delegate simultaneously (user
         # request 2026-07-12: pasting several different clips in a row should
@@ -141,6 +143,13 @@ class ClipListModel(QAbstractListModel):
     def mark_pasted(self, clip_id: int) -> None:
         self._pasted_ids.add(clip_id)
 
+    @property
+    def current_query(self) -> str:
+        return self._current_query
+
+    def match_reason(self, clip_id: int) -> str | None:
+        return self._match_reasons.get(clip_id)
+
     def set_query(self, query: str) -> None:
         self._current_query = query
         self._semantic_scores = {}
@@ -155,7 +164,9 @@ class ClipListModel(QAbstractListModel):
         self._rebuild()
 
     def _rebuild(self) -> None:
-        substring_clips = self._store.search(self._current_query)
+        substring_clips, keyword_reasons = self._store.search_with_reasons(
+            self._current_query
+        )
         rag_active = (
             self._ai_runtime is not None
             and self._ai_runtime.rag_text_enabled
@@ -171,8 +182,25 @@ class ClipListModel(QAbstractListModel):
             )
         else:
             clips = substring_clips
+
+        ai_badges_active = self._ai_runtime is not None and (
+            self._ai_runtime.rag_text_enabled or self._ai_runtime.ocr_enabled
+        )
+        match_reasons = {}
+        if ai_badges_active:
+            semantic_only = (
+                rag_active
+                and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
+            )
+            for clip in clips:
+                keyword_reason = keyword_reasons.get(clip.id)
+                if not semantic_only and keyword_reason is not None:
+                    match_reasons[clip.id] = keyword_reason.value
+                elif rag_active:
+                    match_reasons[clip.id] = "semantic"
         self.beginResetModel()
         self._clips = clips
+        self._match_reasons = match_reasons
         self.endResetModel()
 
     def clip_at(self, row: int) -> Clip:
@@ -256,6 +284,9 @@ class PopupWindow(QWidget):
         self.setMouseTracking(True)  # hover cursor feedback near the resize margin
         self.store = store
         self._ai_runtime = ai_runtime
+        self._settings = config.open_settings()
+        self._search_history = self._load_search_history()
+        self._preserve_search_once = False
         self.model = ClipListModel(store, ai_runtime)
 
         self.search_edit = QLineEdit(self)
@@ -269,6 +300,14 @@ class PopupWindow(QWidget):
         self._mode_badge.setVisible(False)
         self._mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mode_badge.installEventFilter(self)
+
+        self._history_menu = QMenu(self)
+        self._history_button = QToolButton(self)
+        self._history_button.setText(self.tr("History"))
+        self._history_button.setToolTip(self.tr("Recent searches"))
+        self._history_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._history_button.setMenu(self._history_menu)
+        self._refresh_history_menu()
 
         self.list_view = QListView(self)
         self.list_view.setModel(self.model)
@@ -289,6 +328,7 @@ class PopupWindow(QWidget):
 
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
+        search_row.addWidget(self._history_button)
         search_row.addWidget(self._mode_badge)
 
         self._title_bar = _TitleBar(self)
@@ -320,7 +360,6 @@ class PopupWindow(QWidget):
         self._edit_watcher.fileChanged.connect(self._on_edited_file_changed)
         self._edit_sessions: dict[str, tuple[int, str]] = {}
 
-        self._settings = config.open_settings()
         size = self._settings.value("popup/size")
         self.resize(size if size is not None else DEFAULT_SIZE)
 
@@ -336,7 +375,9 @@ class PopupWindow(QWidget):
     # -- lifecycle ---------------------------------------------------------
 
     def show_popup(self) -> None:
-        self.search_edit.clear()
+        if not self._preserve_search_once:
+            self.search_edit.clear()
+        self._preserve_search_once = False
         self._update_mode_badge()
         self.refresh()
         self._select_row(0)
@@ -372,8 +413,29 @@ class PopupWindow(QWidget):
             self.destroy()
 
     def hideEvent(self, event) -> None:
+        self._remember_search_query(self.search_edit.text())
         self._settings.setValue("popup/size", self.size())
         super().hideEvent(event)
+
+    def _load_search_history(self) -> list[str]:
+        raw = self._settings.value("popup/search_history", [])
+        if isinstance(raw, str):
+            return [raw] if raw else []
+        return [str(item) for item in raw]
+
+    def _remember_search_query(self, query: str) -> None:
+        updated = remember_query(self._search_history, query)
+        if updated == self._search_history:
+            return
+        self._search_history = updated
+        self._settings.setValue("popup/search_history", updated)
+        self._refresh_history_menu()
+
+    def _refresh_history_menu(self) -> None:
+        self._history_menu.clear()
+        for query in self._search_history:
+            self._history_menu.addAction(query, lambda q=query: self.search_edit.setText(q))
+        self._history_button.setEnabled(bool(self._search_history))
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.WindowDeactivate:
@@ -560,6 +622,9 @@ class PopupWindow(QWidget):
         self._set_clipboard({"text/plain": transformed.encode("utf-8")}, plain_only=True)
         self.store.touch(clip.id)
         self.model.mark_pasted(clip.id)
+        self._preserve_search_once = bool(
+            config.get(self._settings, "popup/keep_search_after_paste")
+        )
         self.hide()
         self.paste_requested.emit(clip.id, True)
 
@@ -570,6 +635,10 @@ class PopupWindow(QWidget):
         mime_data = self.store.get_data(clip.id)
         self._set_clipboard(mime_data, plain_only)
         self.store.touch(clip.id)
+        if want_paste:
+            self._preserve_search_once = bool(
+                config.get(self._settings, "popup/keep_search_after_paste")
+            )
         self.hide()
         if want_paste:
             self.model.mark_pasted(clip.id)
