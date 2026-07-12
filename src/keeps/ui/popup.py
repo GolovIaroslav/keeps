@@ -355,6 +355,15 @@ class PopupWindow(QWidget):
         if obj is self._mode_badge and event.type() == QEvent.Type.MouseButtonPress:
             self._cycle_search_mode()
             return True
+        # A resize-edge cursor set by mouseMoveEvent (near the window border,
+        # see below) otherwise sticks once the mouse crosses into a child
+        # widget -- Qt doesn't re-deliver mouseMoveEvent to this window once
+        # a child owns the pointer, so unsetCursor() there never runs.
+        if event.type() == QEvent.Type.Enter and obj in (
+            self.search_edit,
+            self.list_view.viewport(),
+        ):
+            self.unsetCursor()
         return super().eventFilter(obj, event)
 
     def _handle_key(self, event: QKeyEvent) -> bool:
