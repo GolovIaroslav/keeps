@@ -585,6 +585,12 @@ class PopupWindow(QWidget):
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
         # Settings behaves identically whether opened from the tray or here.
         SettingsDialog(self._ai_runtime).exec()
+        # Qt doesn't reliably restore focus to search_edit after a modal
+        # dialog closes; _handle_key only fires for events targeting
+        # search_edit specifically, so without this the whole keymap
+        # (F2/F3/Ctrl+P/...) silently stops responding until the user
+        # clicks back into the search box.
+        self.search_edit.setFocus()
 
     def _cycle_search_mode(self) -> None:
         if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
@@ -669,6 +675,7 @@ class PopupWindow(QWidget):
         clip = self.model.clip_at(row)
         mime_data = self.store.get_data(clip.id)
         ViewDialog(clip, mime_data, self).exec()
+        self.search_edit.setFocus()
 
     def _edit_builtin_current(self) -> None:
         """F2, text clips only: built-in modal editor (distinct from Ctrl+E/_edit_current,
@@ -684,6 +691,7 @@ class PopupWindow(QWidget):
         if dialog.exec():
             self.store.update_content(clip.id, {"text/plain": dialog.text().encode("utf-8")})
             self.refresh()
+        self.search_edit.setFocus()
 
     def _edit_current(self) -> None:
         row = self._current_row()
