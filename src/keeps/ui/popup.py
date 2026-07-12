@@ -28,11 +28,13 @@ from PySide6.QtGui import QGuiApplication, QIcon, QImage, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
     QMenu,
     QMessageBox,
+    QTabBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -137,6 +139,7 @@ class ClipListModel(QAbstractListModel):
         # local, not persisted; survives _rebuild() since it lives outside
         # self._clips and is looked up by id, never by row index.
         self._pasted_ids: set[int] = set()
+        self._scope = "history"
 
     @property
     def pasted_ids(self) -> frozenset[int]:
@@ -161,6 +164,10 @@ class ClipListModel(QAbstractListModel):
         self._rebuild()
         if self._ai_runtime is not None and self._ai_runtime.rag_text_enabled and query.strip():
             self._ai_runtime.encode_query_async(query, self._on_semantic_scores)
+
+    def set_scope(self, scope: str) -> None:
+        self._scope = scope
+        self._rebuild()
 
     def _on_semantic_scores(self, query: str, scores: dict[int, float]) -> None:
         if query != self._current_query:
@@ -187,6 +194,7 @@ class ClipListModel(QAbstractListModel):
             )
         else:
             clips = substring_clips
+        clips = self._store.clips_in_scope(self._scope, clips)
 
         ai_badges_active = self._ai_runtime is not None and (
             self._ai_runtime.rag_text_enabled or self._ai_runtime.ocr_enabled
@@ -345,6 +353,14 @@ class PopupWindow(QWidget):
         # there too, so filter the list's key events as well.
         self.list_view.installEventFilter(self)
 
+        self.tabs = QTabBar(self)
+        self.tabs.setExpanding(False)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.tabs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabs.customContextMenuRequested.connect(self._show_tab_context_menu)
+        self._refresh_tabs()
+
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
         search_row.addWidget(self._history_button)
@@ -367,6 +383,7 @@ class PopupWindow(QWidget):
         layout.setContentsMargins(*([_RESIZE_MARGIN] * 4))
         layout.addWidget(self._title_bar)
         layout.addLayout(search_row)
+        layout.addWidget(self.tabs)
         layout.addWidget(self.list_view)
 
         self._debounce = QTimer(self)
@@ -398,6 +415,7 @@ class PopupWindow(QWidget):
             self.search_edit.clear()
         self._preserve_search_once = False
         self._update_mode_badge()
+        self._refresh_tabs()
         self.refresh()
         self._select_row(0)
         self._drop_stale_surface()
@@ -470,6 +488,34 @@ class PopupWindow(QWidget):
         self.model.set_query(self.search_edit.text())
         self._prune_thumbnail_cache()
 
+    def _refresh_tabs(self) -> None:
+        current_scope = (
+            self.tabs.tabData(self.tabs.currentIndex()) if self.tabs.count() else "history"
+        )
+        self.tabs.blockSignals(True)
+        while self.tabs.count():
+            self.tabs.removeTab(0)
+        self.tabs.addTab(self.tr("History"))
+        self.tabs.setTabData(0, "history")
+        self.tabs.addTab(self.tr("Pinned"))
+        self.tabs.setTabData(1, "pinned")
+        for group in self.store.groups():
+            index = self.tabs.addTab(group.name)
+            self.tabs.setTabData(index, f"group:{group.id}")
+        target = next(
+            (i for i in range(self.tabs.count()) if self.tabs.tabData(i) == current_scope),
+            0,
+        )
+        self.tabs.setCurrentIndex(target)
+        self.tabs.blockSignals(False)
+        self.model.set_scope(str(self.tabs.tabData(target)))
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        self.model.set_scope(str(self.tabs.tabData(index)))
+        self._select_row(0)
+
     def on_clip_captured(self, _clip_id: int, _kind: str) -> None:
         """Drop cached pixmaps for clips removed by Store.trim() during capture."""
         self._prune_thumbnail_cache()
@@ -537,6 +583,10 @@ class PopupWindow(QWidget):
 
         if key in _NAV_KEYS:
             QCoreApplication.sendEvent(self.list_view, event)
+            return True
+        if ctrl and key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            step = -1 if shift or key == Qt.Key.Key_Backtab else 1
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + step) % self.tabs.count())
             return True
         if ctrl and key == Qt.Key.Key_A:
             self.list_view.selectAll()
@@ -640,6 +690,28 @@ class PopupWindow(QWidget):
             pin_label,
             lambda: self._set_pinned_ids(selected_ids, pin_target),
         )
+        groups = self.store.groups()
+        if groups:
+            group_menu = menu.addMenu(self.tr("Add to group"))
+            group_menu.addAction(
+                self.tr("No group"), lambda: self._set_group_ids(selected_ids, None)
+            )
+            for group in groups:
+                group_menu.addAction(
+                    group.name,
+                    lambda _checked=False, group_id=group.id: self._set_group_ids(
+                        selected_ids, group_id
+                    ),
+                )
+        scope = str(self.tabs.tabData(self.tabs.currentIndex()))
+        if scope != "history":
+            move_menu = menu.addMenu(self.tr("Move"))
+            move_menu.addAction(
+                self.tr("Up"), lambda: self._move_manual_ids(selected_ids, scope, -1)
+            )
+            move_menu.addAction(
+                self.tr("Down"), lambda: self._move_manual_ids(selected_ids, scope, 1)
+            )
         builtin_edit_action = menu.addAction(self.tr("Edit"), self._edit_builtin_current)
         builtin_edit_action.setEnabled(not multi and clip.kind in EDITABLE_KINDS)
         edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
@@ -654,6 +726,66 @@ class PopupWindow(QWidget):
                 special_menu.addAction(label, lambda t=transform: self._special_paste(row, t))
 
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
+
+    def _show_tab_context_menu(self, pos) -> None:
+        index = self.tabs.tabAt(pos)
+        menu = QMenu(self.tabs)
+        menu.addAction(self.tr("New group"), self._create_group)
+        if index >= 2:
+            group_id = int(str(self.tabs.tabData(index)).partition(":")[2])
+            menu.addAction(
+                self.tr("Rename group"), lambda: self._rename_group(group_id)
+            )
+            menu.addAction(
+                self.tr("Delete group"), lambda: self._delete_group(group_id)
+            )
+        menu.exec(self.tabs.mapToGlobal(pos))
+
+    def _create_group(self) -> None:
+        name, accepted = QInputDialog.getText(self, self.tr("New group"), self.tr("Name"))
+        if not accepted or not name.strip():
+            return
+        try:
+            group_id = self.store.create_group(name)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Cannot create group"), str(exc))
+            return
+        self._refresh_tabs()
+        self._select_scope(f"group:{group_id}")
+
+    def _rename_group(self, group_id: int) -> None:
+        group = next(group for group in self.store.groups() if group.id == group_id)
+        name, accepted = QInputDialog.getText(
+            self, self.tr("Rename group"), self.tr("Name"), text=group.name
+        )
+        if not accepted or not name.strip():
+            return
+        try:
+            self.store.rename_group(group_id, name)
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Cannot rename group"), str(exc))
+            return
+        self._refresh_tabs()
+
+    def _delete_group(self, group_id: int) -> None:
+        answer = QMessageBox.question(
+            self,
+            self.tr("Delete group"),
+            self.tr("Delete this group? Its clips will remain in History."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete_group(group_id)
+        self._refresh_tabs()
+        self.refresh()
+
+    def _select_scope(self, scope: str) -> None:
+        for index in range(self.tabs.count()):
+            if self.tabs.tabData(index) == scope:
+                self.tabs.setCurrentIndex(index)
+                return
 
     def _copy_ocr_text(self, row: int) -> None:
         clip = self.model.clip_at(row)
@@ -911,6 +1043,20 @@ class PopupWindow(QWidget):
             if self.model.clip_at(row).id == clip_ids[0]:
                 self._select_row(row)
                 break
+
+    def _set_group_ids(self, clip_ids: list[int], group_id: int | None) -> None:
+        self.store.set_group_many(clip_ids, group_id)
+        self.refresh()
+        for row in range(self.model.rowCount()):
+            if self.model.clip_at(row).id == clip_ids[0]:
+                self._select_row(row)
+                break
+
+    def _move_manual_ids(self, clip_ids: list[int], scope: str, direction: int) -> None:
+        ordered_ids = clip_ids if direction < 0 else list(reversed(clip_ids))
+        for clip_id in ordered_ids:
+            self.store.move_manual(clip_id, scope, direction)
+        self.refresh()
 
     def _view_current(self) -> None:
         """F3, any kind: read-only expand (Ditto's "View Full Description")."""
