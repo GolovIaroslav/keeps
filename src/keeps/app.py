@@ -94,6 +94,7 @@ def _popup_debug() -> int:
     from PySide6.QtWidgets import QApplication
 
     from keeps.ui.popup import PopupWindow
+    from keeps.ui.thumbnails import ThumbnailRuntime
 
     qt_app = QApplication(sys.argv)
     store = Store(Path("/tmp/keeps-popup-debug.db"))
@@ -124,7 +125,11 @@ def _popup_debug() -> int:
         for i in range(20):
             store.add("text", {"text/plain": f"filler clip {i}".encode()})
 
+    thumbnail_runtime = ThumbnailRuntime(store)
     popup = PopupWindow(store)
+    thumbnail_runtime.thumbnail_ready.connect(popup.on_thumbnail_ready)
+    popup.thumbnail_requested.connect(thumbnail_runtime.on_clip_captured)
+    thumbnail_runtime.run_backlog_sweep()
     popup.show_popup()
     return qt_app.exec()
 
@@ -138,6 +143,7 @@ def _run_daemon(show_immediately: bool) -> int:
     from keeps.ai.runtime import AiRuntime
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
+    from keeps.ui.thumbnails import ThumbnailRuntime
     from keeps.ui.tray import TrayIcon
 
     desktop_entry.ensure_installed()
@@ -159,7 +165,9 @@ def _run_daemon(show_immediately: bool) -> int:
     watcher = _make_watcher(store, float(config.get(settings, "general/max_item_mb")))
 
     ai_runtime = AiRuntime(store, settings)
+    thumbnail_runtime = ThumbnailRuntime(store)
     watcher.clip_added.connect(ai_runtime.on_clip_captured)
+    watcher.clip_added.connect(thumbnail_runtime.on_clip_captured)
     watcher.start()
     if ai_runtime.ocr_enabled:
         ai_runtime.run_ocr_backlog_sweep()
@@ -167,6 +175,9 @@ def _run_daemon(show_immediately: bool) -> int:
         ai_runtime.run_text_embed_backlog_sweep()
 
     popup = PopupWindow(store, ai_runtime)
+    thumbnail_runtime.thumbnail_ready.connect(popup.on_thumbnail_ready)
+    popup.thumbnail_requested.connect(thumbnail_runtime.on_clip_captured)
+    thumbnail_runtime.run_backlog_sweep()
 
     socket_path = _socket_path()
     QLocalServer.removeServer(socket_path)  # drop a stale socket from a crashed instance

@@ -238,6 +238,7 @@ class PopupWindow(QWidget):
     # ydotool/xdotool injection (keeps.paste), after paste/delay_ms. Ctrl+C
     # copies without emitting this.
     paste_requested = Signal(int, bool)  # (clip_id, plain_only)
+    thumbnail_requested = Signal(int, str)  # (clip_id, kind), after an image edit
 
     def __init__(
         self, store: Store, ai_runtime: AiRuntime | None = None, parent: QWidget | None = None
@@ -386,6 +387,10 @@ class PopupWindow(QWidget):
 
     def refresh(self) -> None:
         self.model.set_query(self.search_edit.text())
+
+    def on_thumbnail_ready(self, clip_id: int) -> None:
+        self._delegate.invalidate_thumbnail(clip_id)
+        self.list_view.viewport().update()
 
     def _apply_filter(self) -> None:
         self.refresh()
@@ -601,6 +606,7 @@ class PopupWindow(QWidget):
         if row is None:
             return
         clip = self.model.clip_at(row)
+        self._delegate.invalidate_thumbnail(clip.id)
         self.store.delete(clip.id)
         self.refresh()
         self._select_row(min(row, self.model.rowCount() - 1))
@@ -747,21 +753,27 @@ class PopupWindow(QWidget):
         if session is None or not os.path.exists(path):
             return
         clip_id, kind = session
+        result_id = clip_id
         if kind == "text":
             with open(path, encoding="utf-8") as f:
                 new_text = f.read()
-            self.store.update_content(clip_id, {"text/plain": new_text.encode("utf-8")})
+            result_id = self.store.update_content(
+                clip_id, {"text/plain": new_text.encode("utf-8")}
+            )
         else:
             with open(path, "rb") as f:
                 new_bytes = f.read()
             if kind == "image":
-                self.store.update_content(clip_id, {"image/png": new_bytes})
+                self._delegate.invalidate_thumbnail(clip_id)
+                result_id = self.store.update_content(clip_id, {"image/png": new_bytes})
             else:
                 mime_data = self.store.get_data(clip_id).copy()
                 # Preserve the plain-text fallback; deriving it from edited
                 # HTML is out of scope.
                 mime_data["text/html"] = new_bytes
-                self.store.update_content(clip_id, mime_data)
+                result_id = self.store.update_content(clip_id, mime_data)
+        if kind == "image":
+            self.thumbnail_requested.emit(result_id, kind)
         self.refresh()
         if path not in self._edit_watcher.files():
             self._edit_watcher.addPath(path)  # some editors atomic-save (rm+recreate)

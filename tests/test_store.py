@@ -240,6 +240,17 @@ def test_deleting_clip_cascades_to_thumbnail(store):
     assert store.get_thumbnail(clip_id) is None
 
 
+def test_updating_image_content_invalidates_thumbnail(store):
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_thumbnail(clip_id, b"thumbnail-for-old-image")
+    edited_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])
+
+    store.update_content(clip_id, {"image/png": edited_png})
+
+    assert store.get_thumbnail(clip_id) is None
+    assert store.clips_missing_thumbnail() == [clip_id]
+
+
 def test_clips_missing_embedding_lists_only_text_and_html_without_it(store):
     embedded = store.add("text", {"text/plain": b"already embedded"})
     store.set_embedding(embedded, "model-x", b"vec")

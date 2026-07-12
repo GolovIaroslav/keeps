@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
-from PySide6.QtGui import QFontMetrics, QImage, QPen, QPixmap
+from PySide6.QtGui import QFontMetrics, QPen, QPixmap, QPixmapCache
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from keeps.store import Store
@@ -25,6 +25,7 @@ class ClipItemDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._store = store
         self._scale = 1.0
+        self._thumbnail_cache_keys: dict[int, str] = {}
 
     def set_scale(self, scale: float) -> None:
         """Scale thumbnail/padding pixel sizes to match the UI scale (Ctrl+scroll)."""
@@ -35,6 +36,30 @@ class ClipItemDelegate(QStyledItemDelegate):
 
     def _padding(self) -> int:
         return round(PADDING * self._scale)
+
+    def invalidate_thumbnail(self, clip_id: int) -> None:
+        cache_key = self._thumbnail_cache_keys.pop(clip_id, None)
+        if cache_key is not None:
+            QPixmapCache.remove(cache_key)
+
+    def _thumbnail_pixmap(self, clip_id: int, clip_hash: str) -> QPixmap | None:
+        cache_key = f"keeps-thumbnail:{clip_id}:{clip_hash}"
+        previous_key = self._thumbnail_cache_keys.get(clip_id)
+        if previous_key is not None and previous_key != cache_key:
+            QPixmapCache.remove(previous_key)
+            self._thumbnail_cache_keys.pop(clip_id, None)
+
+        pixmap = QPixmapCache.find(cache_key)
+        if pixmap is not None:
+            return pixmap
+
+        png = self._store.get_thumbnail(clip_id)
+        pixmap = QPixmap()
+        if png is None or not pixmap.loadFromData(png, "PNG"):
+            return None
+        QPixmapCache.insert(cache_key, pixmap)
+        self._thumbnail_cache_keys[clip_id] = cache_key
+        return pixmap
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         metrics = QFontMetrics(option.font)
@@ -80,16 +105,15 @@ class ClipItemDelegate(QStyledItemDelegate):
 
         if clip.kind == "image":
             thumbnail_size = self._thumbnail_size()
-            png = self._store.get_data(clip.id).get("image/png")
-            image = QImage.fromData(png, "PNG") if png else QImage()
-            if not image.isNull():
-                pixmap = QPixmap.fromImage(image).scaled(
+            pixmap = self._thumbnail_pixmap(clip.id, clip.hash)
+            if pixmap is not None:
+                scaled_pixmap = pixmap.scaled(
                     thumbnail_size,
                     thumbnail_size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                painter.drawPixmap(rect.left(), rect.top(), pixmap)
+                painter.drawPixmap(rect.left(), rect.top(), scaled_pixmap)
             if clip.ocr_text and clip.ocr_text.strip():
                 original_font = painter.font()
                 badge_font = painter.font()

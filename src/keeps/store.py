@@ -279,6 +279,8 @@ class Store:
             "INSERT INTO clip_data (clip_id, mime, data) VALUES (?, ?, ?)",
             [(clip_id, mime, data) for mime, data in mime_data.items()],
         )
+        if kind == "image":
+            self._conn.execute("DELETE FROM thumbs WHERE clip_id = ?", (clip_id,))
         self._conn.commit()
         return clip_id
 
