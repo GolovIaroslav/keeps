@@ -45,16 +45,25 @@ def launch_command(
     package). Running from an AppImage the real launchable thing is the image
     itself ($APPIMAGE, set by the AppImage runtime); running from a source
     checkout it is the venv's console script (sys.argv[0]).
+
+    The absolute-path check runs *before* the `which()` check: `uv run keeps`
+    also makes `which("keeps")` succeed, since uv prepends the venv's bin dir
+    to PATH for that one child process only -- trusting it there would write
+    a bare `Exec=keeps` that fails from any future launch context (a plain
+    login shell, the Applications menu) whose PATH doesn't have that venv on
+    it. An absolute path is always launchable regardless of PATH, so it's
+    preferred whenever sys.argv[0] resolves to a real file; `which()` is only
+    the fallback for the cases where it doesn't (e.g. `python -m keeps`).
     """
     env = os.environ if environ is None else environ
     appimage = env.get("APPIMAGE")
     if appimage:
         return appimage
-    if which("keeps"):
-        return "keeps"
     candidate = Path(argv0 if argv0 is not None else sys.argv[0])
     if candidate.name == "keeps" and candidate.is_file():
         return str(candidate.resolve())
+    if which("keeps"):
+        return "keeps"
     return "keeps"
 
 

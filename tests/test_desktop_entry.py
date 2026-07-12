@@ -33,6 +33,14 @@ def test_ensure_installed_is_idempotent(tmp_path):
         ({}, True, False, "keeps"),
         # Source checkout: fall back to the venv console script's absolute path.
         ({}, False, True, "<argv0>"),
+        # `uv run keeps`: which("keeps") ALSO succeeds here, because uv
+        # prepends the venv's bin dir to PATH for this one child process --
+        # but that PATH extension doesn't exist for a future launch from a
+        # plain shell or the Applications menu, so the absolute path must
+        # still win over the bare name (regression test for the real bug
+        # this caused: every dev-daemon run silently clobbered the
+        # AppImage-pointing Exec= line with a non-portable "keeps").
+        ({}, True, True, "<argv0>"),
         # Nothing works: keep the old bare name rather than something invalid.
         ({}, False, False, "keeps"),
     ],
