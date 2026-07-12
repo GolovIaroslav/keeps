@@ -281,6 +281,10 @@ class PopupWindow(QWidget):
         # Wheel events over the list land on its viewport, not list_view itself
         # (QAbstractScrollArea plumbing) -- filter there for Ctrl+wheel scaling.
         self.list_view.viewport().installEventFilter(self)
+        # Clicking a clip moves keyboard focus from search_edit to the list
+        # itself; the popup keymap (F2/F3/Ctrl+P/...) must keep working from
+        # there too, so filter the list's key events as well.
+        self.list_view.installEventFilter(self)
 
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
@@ -372,7 +376,12 @@ class PopupWindow(QWidget):
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.WindowDeactivate:
-            self.hide()
+            # Opening one of our own modal dialogs (F2/F3/Settings) also
+            # deactivates the popup; hiding it then strands the dialog with
+            # no parent window under it (possibly on another screen) and the
+            # popup looks "hung" behind the invisible modal grab.
+            if QGuiApplication.modalWindow() is None:
+                self.hide()
         return super().event(event)
 
     def refresh(self) -> None:
@@ -396,6 +405,13 @@ class PopupWindow(QWidget):
         if event.type() == QEvent.Type.Wheel and self._handle_wheel(event):
             return True
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress:
+            return self._handle_key(event)
+        if obj is self.list_view and event.type() == QEvent.Type.KeyPress:
+            if event.key() in _NAV_KEYS:
+                # QListView's own navigation already handles these; falling
+                # through to _handle_key would sendEvent() the event straight
+                # back to list_view and recurse through this filter.
+                return False
             return self._handle_key(event)
         if obj is self._mode_badge and event.type() == QEvent.Type.MouseButtonPress:
             self._cycle_search_mode()
