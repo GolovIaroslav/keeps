@@ -207,7 +207,7 @@ class ClipItemDelegate(QStyledItemDelegate):
         meta_parts = [KIND_LABELS.get(clip.kind, clip.kind.upper())]
         match_reason = index.model().match_reason(clip.id)
         if match_reason:
-            meta_parts.append(f"[{match_reason}]")
+            meta_parts.append(f"[{match_reason.value}]")
         meta_parts.append(age)
         meta = " · ".join(meta_parts)
         painter.drawText(
@@ -219,11 +219,12 @@ class ClipItemDelegate(QStyledItemDelegate):
         preview_rect = QRect(
             rect.left(), rect.top() + line_height, rect.width(), line_height * MAX_PREVIEW_LINES
         )
+        display_text = index.model().display_text(clip)
         self._draw_highlighted_preview(
             painter,
             option,
             preview_rect,
-            clip.preview,
+            display_text,
             index.model().current_query,
         )
         painter.restore()

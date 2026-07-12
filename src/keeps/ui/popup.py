@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from keeps import config, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
-from keeps.search import remember_query
+from keeps.search import MatchReason, remember_query
 from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
@@ -127,7 +127,8 @@ class ClipListModel(QAbstractListModel):
         self._clips: list[Clip] = []
         self._current_query = ""
         self._semantic_scores: dict[int, float] = {}
-        self._match_reasons: dict[int, str] = {}
+        self._match_reasons: dict[int, MatchReason] = {}
+        self._display_texts: dict[int, str] = {}
         # Ф9.3: ids of every clip *pasted* (not merely copied) this popup
         # session, all highlighted by the delegate simultaneously (user
         # request 2026-07-12: pasting several different clips in a row should
@@ -147,8 +148,11 @@ class ClipListModel(QAbstractListModel):
     def current_query(self) -> str:
         return self._current_query
 
-    def match_reason(self, clip_id: int) -> str | None:
+    def match_reason(self, clip_id: int) -> MatchReason | None:
         return self._match_reasons.get(clip_id)
+
+    def display_text(self, clip: Clip) -> str:
+        return self._display_texts.get(clip.id, clip.preview)
 
     def set_query(self, query: str) -> None:
         self._current_query = query
@@ -186,21 +190,34 @@ class ClipListModel(QAbstractListModel):
         ai_badges_active = self._ai_runtime is not None and (
             self._ai_runtime.rag_text_enabled or self._ai_runtime.ocr_enabled
         )
-        match_reasons = {}
+        semantic_only = (
+            rag_active
+            and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
+        )
+        display_texts = {}
+        if not semantic_only:
+            for clip in clips:
+                keyword_reason = keyword_reasons.get(clip.id)
+                if keyword_reason is None:
+                    continue
+                snippet = self._store.search_snippet(
+                    clip.id, self._current_query, keyword_reason
+                )
+                if snippet:
+                    display_texts[clip.id] = snippet
+
+        match_reasons: dict[int, MatchReason] = {}
         if ai_badges_active:
-            semantic_only = (
-                rag_active
-                and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
-            )
             for clip in clips:
                 keyword_reason = keyword_reasons.get(clip.id)
                 if not semantic_only and keyword_reason is not None:
-                    match_reasons[clip.id] = keyword_reason.value
+                    match_reasons[clip.id] = keyword_reason
                 elif rag_active:
-                    match_reasons[clip.id] = "semantic"
+                    match_reasons[clip.id] = MatchReason.SEMANTIC
         self.beginResetModel()
         self._clips = clips
         self._match_reasons = match_reasons
+        self._display_texts = display_texts
         self.endResetModel()
 
     def clip_at(self, row: int) -> Clip:
@@ -213,7 +230,7 @@ class ClipListModel(QAbstractListModel):
         if not index.isValid():
             return None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
-            return self._clips[index.row()].preview
+            return self.display_text(self._clips[index.row()])
         return None
 
 

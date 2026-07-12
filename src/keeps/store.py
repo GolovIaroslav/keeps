@@ -180,23 +180,34 @@ class Store:
         return self._db_path
 
     def _rebuild_search_index(self) -> None:
+        from keeps.search import CONTENT_LIMIT_BYTES
+
         rows = self._conn.execute(
-            "SELECT c.id, c.kind, c.ocr_text, d.mime, d.data FROM clips c "
-            "LEFT JOIN clip_data d ON d.clip_id = c.id ORDER BY c.id"
-        ).fetchall()
-        metadata: dict[int, tuple[str, str | None]] = {}
-        mime_data_by_id: dict[int, dict[str, bytes]] = {}
+            "SELECT c.id, c.kind, c.ocr_text, d.mime, substr(d.data, 1, ?) AS data "
+            "FROM clips c LEFT JOIN clip_data d ON d.clip_id = c.id AND ("
+            "  (c.kind IN ('text', 'html') AND d.mime IN ('text/plain', 'text/html')) OR "
+            "  (c.kind = 'files' AND d.mime = 'text/uri-list')"
+            ") ORDER BY c.id, d.mime",
+            (CONTENT_LIMIT_BYTES,),
+        )
+        current_id = None
+        current_kind = ""
+        current_ocr = None
+        current_mime_data: dict[str, bytes] = {}
         for row in rows:
-            clip_id = row["id"]
-            metadata[clip_id] = (row["kind"], row["ocr_text"])
+            if current_id is not None and row["id"] != current_id:
+                self._search_index.upsert(
+                    current_id, current_kind, current_mime_data, current_ocr
+                )
+                current_mime_data = {}
+            current_id = row["id"]
+            current_kind = row["kind"]
+            current_ocr = row["ocr_text"]
             if row["mime"] is not None:
-                mime_data_by_id.setdefault(clip_id, {})[row["mime"]] = row["data"]
-        for clip_id, (kind, ocr_text) in metadata.items():
+                current_mime_data[row["mime"]] = row["data"]
+        if current_id is not None:
             self._search_index.upsert(
-                clip_id,
-                kind,
-                mime_data_by_id.get(clip_id, {}),
-                ocr_text,
+                current_id, current_kind, current_mime_data, current_ocr
             )
 
     def backup_now(self) -> Path:
@@ -389,6 +400,11 @@ class Store:
             return self.all(), {}
         reasons = self._search_index.search(query)
         return [clip for clip in self.all() if clip.id in reasons], reasons
+
+    def search_snippet(
+        self, clip_id: int, query: str, reason: MatchReason
+    ) -> str | None:
+        return self._search_index.snippet(clip_id, query, reason)
 
     def set_ocr_text(self, clip_id: int, text: str) -> None:
         self._conn.execute("UPDATE clips SET ocr_text = ? WHERE id = ?", (text, clip_id))

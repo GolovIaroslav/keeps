@@ -15,6 +15,9 @@ def test_search_finds_text_beyond_preview_limit(index):
     index.upsert(1, "text", {"text/plain": content})
 
     assert index.search("needle") == {1: MatchReason.EXACT}
+    snippet = index.snippet(1, "needle", MatchReason.EXACT)
+    assert snippet.startswith("…")
+    assert "hidden needle" in snippet
 
 
 def test_search_requires_every_word_in_any_order(index):
@@ -49,6 +52,7 @@ def test_search_reports_ocr_reason_and_allows_terms_across_fields(index):
         1: MatchReason.OCR,
         2: MatchReason.OCR,
     }
+    assert index.snippet(1, "invoice", MatchReason.OCR) == "invoice number 42"
 
 
 def test_search_only_indexes_first_ten_kib(index):

@@ -11,11 +11,14 @@ from keeps.store import normalize
 
 CONTENT_LIMIT_BYTES = 10 * 1024
 SEARCH_HISTORY_LIMIT = 20
+SNIPPET_MAX_CHARS = 300
+SNIPPET_CONTEXT_CHARS = 80
 
 
 class MatchReason(StrEnum):
     EXACT = "exact"
     OCR = "ocr"
+    SEMANTIC = "semantic"
 
 
 def remember_query(
@@ -32,7 +35,9 @@ def remember_query(
 @dataclass(frozen=True)
 class _Document:
     content: str
+    normalized_content: str
     ocr: str
+    normalized_ocr: str
 
 
 def _decode_limited(data: bytes) -> str:
@@ -69,9 +74,13 @@ class SearchIndex:
         mime_data: dict[str, bytes],
         ocr_text: str | None = None,
     ) -> None:
+        content = _content_for(kind, mime_data)
+        ocr = ocr_text or ""
         self._documents[clip_id] = _Document(
-            content=normalize(_content_for(kind, mime_data)),
-            ocr=normalize(ocr_text or ""),
+            content=content,
+            normalized_content=normalize(content),
+            ocr=ocr,
+            normalized_ocr=normalize(ocr),
         )
 
     def remove(self, clip_id: int) -> None:
@@ -82,7 +91,9 @@ class SearchIndex:
         if document is not None:
             self._documents[clip_id] = _Document(
                 content=document.content,
-                ocr=normalize(ocr_text),
+                normalized_content=document.normalized_content,
+                ocr=ocr_text,
+                normalized_ocr=normalize(ocr_text),
             )
 
     def search(self, query: str) -> dict[int, MatchReason]:
@@ -92,10 +103,34 @@ class SearchIndex:
 
         matches = {}
         for clip_id, document in self._documents.items():
-            content_hits = [term in document.content for term in terms]
+            content_hits = [term in document.normalized_content for term in terms]
             if all(content_hits):
                 matches[clip_id] = MatchReason.EXACT
                 continue
-            if all(hit or term in document.ocr for hit, term in zip(content_hits, terms)):
+            if all(
+                hit or term in document.normalized_ocr
+                for hit, term in zip(content_hits, terms)
+            ):
                 matches[clip_id] = MatchReason.OCR
         return matches
+
+    def snippet(self, clip_id: int, query: str, reason: MatchReason) -> str | None:
+        document = self._documents.get(clip_id)
+        if document is None or reason == MatchReason.SEMANTIC:
+            return None
+        source = document.content if reason == MatchReason.EXACT else document.ocr
+        normalized_source = normalize(source)
+        positions = [
+            normalized_source.find(normalize(term))
+            for term in query.split()
+            if normalize(term) in normalized_source
+        ]
+        first_match = min(positions, default=0)
+        start = max(0, first_match - SNIPPET_CONTEXT_CHARS)
+        end = min(len(source), start + SNIPPET_MAX_CHARS)
+        snippet = source[start:end]
+        if start:
+            snippet = "…" + snippet
+        if end < len(source):
+            snippet += "…"
+        return snippet

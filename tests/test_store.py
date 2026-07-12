@@ -118,6 +118,21 @@ def test_search_index_tracks_content_updates_and_deletion(store):
     assert store.search("after") == []
 
 
+def test_search_index_rebuilds_from_persisted_full_content(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    store = Store(db_path)
+    clip_id = store.add("text", {"text/plain": (b"x" * 400) + b" persisted needle"})
+    store.close()
+
+    reopened = Store(db_path)
+    results, reasons = reopened.search_with_reasons("persisted needle")
+    snippet = reopened.search_snippet(clip_id, "needle", reasons[clip_id])
+    reopened.close()
+
+    assert [clip.id for clip in results] == [clip_id]
+    assert "persisted needle" in snippet
+
+
 def test_hash_stable_across_instances(tmp_path):
     s1 = Store(tmp_path / "keeps.db")
     clip_id = s1.add("text", {"text/plain": b"stable content"})
