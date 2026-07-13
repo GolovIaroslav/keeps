@@ -118,6 +118,14 @@ def test_build_bundle_downgrades_unformatted_html_without_rereading_it():
     assert reads == [MIME_HTML, MIME_PLAIN]
 
 
+def test_build_bundle_decodes_json_unicode_escapes_in_plain_text():
+    escaped = r"\u0427\u0442\u043e \u0443\u0436\u0435 \u0432\u044b\u044f\u0441\u043d\u0438\u043b"
+
+    result = build_bundle({MIME_PLAIN}, lambda _mime: escaped.encode("ascii"))
+
+    assert result == ("text", {MIME_PLAIN: "Что уже выяснил".encode()})
+
+
 @pytest.mark.parametrize(
     ("available", "expected_kind", "expected_reads"),
     [

@@ -51,6 +51,57 @@ _REAL_FORMATTING_TAGS = frozenset(
     }
 )
 
+_UNICODE_ESCAPE_RE = re.compile(r"(?<!\\)\\u([0-9a-fA-F]{4})")
+
+
+def decode_unicode_escapes(text: str) -> str:
+    """Decode literal JSON-style Unicode escapes in an escaped text payload.
+
+    Some clipboard producers expose a response's serialized representation as
+    plain text, so Cyrillic arrives as ``\\u041f\\u0440...`` instead of actual
+    Unicode characters.  Decode only ``\\uXXXX`` sequences; other backslash
+    escapes and ordinary text remain untouched.
+    """
+    result: list[str] = []
+    position = 0
+    while match := _UNICODE_ESCAPE_RE.search(text, position):
+        result.append(text[position : match.start()])
+        codepoint = int(match.group(1), 16)
+        end = match.end()
+
+        # JSON encodes supplementary characters as a UTF-16 surrogate pair.
+        if 0xD800 <= codepoint <= 0xDBFF:
+            low_match = _UNICODE_ESCAPE_RE.match(text, end)
+            if low_match is not None:
+                low = int(low_match.group(1), 16)
+                if 0xDC00 <= low <= 0xDFFF:
+                    codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
+                    end = low_match.end()
+                else:
+                    result.append(match.group(0))
+                    position = end
+                    continue
+            else:
+                result.append(match.group(0))
+                position = end
+                continue
+        elif 0xDC00 <= codepoint <= 0xDFFF:
+            result.append(match.group(0))
+            position = end
+            continue
+
+        result.append(chr(codepoint))
+        position = end
+
+    result.append(text[position:])
+    return "".join(result)
+
+
+def normalize_plain_text(data: bytes) -> bytes:
+    """Return UTF-8 plain text, including escaped-Unicode clipboard payloads."""
+    text = data.decode("utf-8", errors="replace")
+    return decode_unicode_escapes(text).encode("utf-8")
+
 
 def html_has_real_formatting(html_bytes: bytes) -> bool:
     """True if html contains tags beyond a trivial wrapper.
@@ -121,6 +172,8 @@ def build_bundle(
     def read(mime: str) -> bytes:
         if mime not in cache:
             cache[mime] = reader(mime)
+            if mime == MIME_PLAIN:
+                cache[mime] = normalize_plain_text(cache[mime])
         return cache[mime]
 
     kind = detect_kind(available)
