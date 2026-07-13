@@ -277,6 +277,13 @@ class Store:
     def db_path(self) -> Path:
         return self._db_path
 
+    def set_max_items(self, max_items: int) -> None:
+        """Change the retention limit for the running daemon and trim now."""
+        if max_items < 1:
+            raise ValueError("max_items must be positive")
+        self.max_items = max_items
+        self.trim()
+
     def _rebuild_search_index(self) -> None:
         from keeps.search import CONTENT_LIMIT_BYTES
 

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -25,6 +26,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QAction,
     QGuiApplication,
     QIcon,
     QKeyEvent,
@@ -49,7 +51,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from keeps import clip_archive, compare, config, multi_paste, paste
+from keeps import clip_archive, compare, config, desktop_apps, multi_paste, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.clipboard import make_mime_data
@@ -352,6 +354,7 @@ class PopupWindow(QWidget):
         *,
         clip_hotkeys: ClipGlobalHotkeyManager | None = None,
         buffer_hotkeys: CopyBufferHotkeyManager | None = None,
+        settings_applier: Callable[[], None] | None = None,
     ) -> None:
         # Qt.WindowType.Popup would give us free hide-on-outside-click, but its
         # Wayland grab requires a focused transient parent — we have none (a
@@ -374,6 +377,7 @@ class PopupWindow(QWidget):
         self._restore_persistent_after_paste = False
         self._clip_hotkeys = clip_hotkeys
         self._buffer_hotkeys = buffer_hotkeys
+        self._settings_applier = settings_applier
         self._local_hotkeys: dict[int, QShortcut] = {}
         self._forwarding_navigation = False
         self.model = ClipListModel(store, ai_runtime)
@@ -528,6 +532,16 @@ class PopupWindow(QWidget):
     def set_buffer_hotkey_manager(self, manager: CopyBufferHotkeyManager) -> None:
         """Let the popup's Settings path apply buffer bindings immediately."""
         self._buffer_hotkeys = manager
+
+    def set_settings_applier(self, callback: Callable[[], None]) -> None:
+        """Attach the daemon-owned Apply action after its runtime objects exist."""
+        self._settings_applier = callback
+
+    def apply_settings(self) -> None:
+        """Refresh this window's QSettings view and live local bindings."""
+        self._settings.sync()
+        self._refresh_local_hotkeys()
+        self.refresh()
 
     def _hotkey_error_text(self, error: str) -> str:
         messages = {
@@ -915,20 +929,30 @@ class PopupWindow(QWidget):
         multi = len(selected_rows) > 1
 
         menu = QMenu(self.list_view)
-        menu.addAction(
-            self.tr("Paste"),
+
+        def add_keyed_action(label: str, key_action: str, callback) -> QAction:
+            action = menu.addAction(self.tr(label), callback)
+            action.setShortcut(QKeySequence(self._keybinding_text(key_action)))
+            action.setShortcutVisibleInContextMenu(True)
+            return action
+
+        add_keyed_action(
+            "Paste",
+            "paste",
             lambda: self._activate_selection_ids(
                 selected_ids, plain_only=False, want_paste=True
             ),
         )
-        menu.addAction(
-            self.tr("Paste as text"),
+        add_keyed_action(
+            "Paste as text",
+            "paste_plain",
             lambda: self._activate_selection_ids(
                 selected_ids, plain_only=True, want_paste=True
             ),
         )
-        menu.addAction(
-            self.tr("Copy"),
+        add_keyed_action(
+            "Copy",
+            "copy",
             lambda: self._activate_selection_ids(
                 selected_ids, plain_only=False, want_paste=False
             ),
@@ -936,12 +960,13 @@ class PopupWindow(QWidget):
         if not multi and clip.kind == "image" and clip.ocr_text and clip.ocr_text.strip():
             menu.addAction(self.tr("Copy recognized text"), lambda: self._copy_ocr_text(row))
         menu.addSeparator()
-        view_action = menu.addAction(self.tr("View"), self._view_current)
+        view_action = add_keyed_action("View", "view", self._view_current)
         view_action.setEnabled(not multi)
         pin_target = not all(selected_clip.pinned for selected_clip in clips)
         pin_label = self.tr("Pin") if pin_target else self.tr("Unpin")
-        menu.addAction(
+        add_keyed_action(
             pin_label,
+            "pin",
             lambda: self._set_pinned_ids(selected_ids, pin_target),
         )
         groups = self.store.groups()
@@ -966,12 +991,12 @@ class PopupWindow(QWidget):
             move_menu.addAction(
                 self.tr("Down"), lambda: self._move_manual_ids(selected_ids, scope, 1)
             )
-        builtin_edit_action = menu.addAction(self.tr("Edit"), self._edit_builtin_current)
+        builtin_edit_action = add_keyed_action("Edit", "edit", self._edit_builtin_current)
         builtin_edit_action.setEnabled(not multi and clip.kind in EDITABLE_KINDS)
-        edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
+        edit_action = add_keyed_action("Edit externally", "edit_external", self._edit_current)
         edit_action.setEnabled(not multi and clip.kind in EXTERNAL_EDIT_KINDS)
-        properties_action = menu.addAction(
-            self.tr("Properties"), lambda: self._properties_id(clip.id)
+        properties_action = add_keyed_action(
+            "Properties", "properties", lambda: self._properties_id(clip.id)
         )
         properties_action.setEnabled(not multi)
         plain_text = self.store.get_data(clip.id).get("text/plain") if not multi else None
@@ -979,7 +1004,7 @@ class PopupWindow(QWidget):
             self.tr("View as QR"), lambda: self._view_qr_id(clip.id)
         )
         qr_action.setEnabled(not multi and plain_text is not None)
-        menu.addAction(self.tr("Delete"), lambda: self._delete_ids(selected_ids))
+        add_keyed_action("Delete", "delete", lambda: self._delete_ids(selected_ids))
 
         menu.addSeparator()
         menu.addAction(
@@ -994,6 +1019,10 @@ class PopupWindow(QWidget):
         ) is not None
         compare_action.setEnabled(comparison_available)
         menu.addAction(self.tr("Export selected..."), lambda: self._export_ids(selected_ids))
+        menu.addAction(
+            self.tr("Export as Keeps archive..."),
+            lambda: self._export_archive_ids(selected_ids),
+        )
 
         if plain_text is not None:
             menu.addSeparator()
@@ -1111,6 +1140,42 @@ class PopupWindow(QWidget):
         self._after_local_add(clip_id, "text")
 
     def _export_ids(self, clip_ids: list[int]) -> None:
+        if not clip_ids:
+            return
+        if len(clip_ids) == 1:
+            clip = next((item for item in self.store.all() if item.id == clip_ids[0]), None)
+            if clip is None:
+                return
+            try:
+                suffix, data = clip_archive.content_export(clip.kind, self.store.get_data(clip.id))
+            except ValueError as exc:
+                QMessageBox.warning(self, self.tr("Cannot export clip"), str(exc))
+                return
+            filters = {
+                ".png": self.tr("PNG image (*.png)"),
+                ".html": self.tr("HTML document (*.html)"),
+                ".txt": self.tr("Text file (*.txt)"),
+            }
+            filename, _selected_filter = QFileDialog.getSaveFileName(
+                self,
+                self.tr("Export clip content"),
+                f"keeps-clip{suffix}",
+                filters[suffix],
+            )
+            if not filename:
+                return
+            path = Path(filename)
+            if path.suffix.casefold() != suffix:
+                path = path.with_name(f"{path.name}{suffix}")
+            try:
+                path.write_bytes(data)
+            except OSError as exc:
+                QMessageBox.warning(self, self.tr("Cannot export clip"), str(exc))
+            self.search_edit.setFocus()
+            return
+        self._export_archive_ids(clip_ids)
+
+    def _export_archive_ids(self, clip_ids: list[int]) -> None:
         if not clip_ids:
             return
         filename, _selected_filter = QFileDialog.getSaveFileName(
@@ -1235,9 +1300,8 @@ class PopupWindow(QWidget):
                 self.tr("The selected clips have no shared text format."),
             )
             return
-        command = compare.diff_command(
-            str(config.get(self._settings, "general/external_diff")), shutil.which
-        )
+        configured_diff = str(config.get(self._settings, "general/external_diff")).strip()
+        command = compare.diff_command(configured_diff, shutil.which)
         if command is None:
             QMessageBox.warning(
                 self,
@@ -1249,7 +1313,12 @@ class PopupWindow(QWidget):
         directory = Path(tempfile.mkdtemp(prefix="keeps-compare-"))
         left_path, right_path = compare.write_comparison_pair(directory, suffix, left, right)
         try:
-            process = subprocess.Popen([*command, str(left_path), str(right_path)])
+            argv = (
+                desktop_apps.command_for_files(configured_diff, [left_path, right_path])
+                if configured_diff
+                else [*command, str(left_path), str(right_path)]
+            )
+            process = subprocess.Popen(argv)
         except OSError as exc:
             shutil.rmtree(directory, ignore_errors=True)
             QMessageBox.warning(self, self.tr("Cannot start diff tool"), str(exc))
@@ -1438,6 +1507,7 @@ class PopupWindow(QWidget):
             self.store,
             clip_hotkeys=self._clip_hotkeys,
             buffer_hotkeys=self._buffer_hotkeys,
+            apply_callback=self._settings_applier,
         ).exec()
         self.refresh()
         # Qt doesn't reliably restore focus to search_edit after a modal
@@ -1684,7 +1754,7 @@ class PopupWindow(QWidget):
         self._edit_watcher.addPath(path)
         editor_key = f"general/external_editor_{clip.kind}"
         configured_editor = str(config.get(self._settings, editor_key)).strip()
-        subprocess.Popen([configured_editor or "xdg-open", path])
+        subprocess.Popen(desktop_apps.command_for_files(configured_editor, [path]))
 
     def _on_edited_file_changed(self, path: str) -> None:
         session = self._edit_sessions.get(path)

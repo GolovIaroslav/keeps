@@ -14,6 +14,7 @@ Name=Keeps
 Comment=Clipboard manager
 Exec={exec_command}
 Icon=edit-paste
+StartupWMClass=keeps
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 """

@@ -42,7 +42,7 @@ uv run keeps
 - `keeps show` — show the popup without toggling it closed.
 - `keeps status` — run diagnostics (wl-paste, ydotool, kglobalaccel, session type, Klipper, AI models).
 
-The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; use the popup title bar to create or import clips. Settings (`general`/`capture`/`ai` tabs) live at `~/.config/keeps/keeps.ini`.
+The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; a single clip is exported in its real format (for example an image as PNG), while `Export as Keeps archive...` creates a portable `.keeps.json` backup. Use the popup title bar to create or import clips. Settings (including the scrollable `Paste` tab) live at `~/.config/keeps/keeps.ini`.
 
 ### Popup keymap
 

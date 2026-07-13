@@ -44,6 +44,9 @@ class X11Watcher(QObject):
     def start(self) -> None:
         pass  # QClipboard is already live once QApplication exists.
 
+    def set_max_item_mb(self, max_item_mb: float) -> None:
+        self._max_item_mb = max_item_mb
+
     def stop(self) -> None:
         self._clipboard.dataChanged.disconnect(self._on_changed)
 

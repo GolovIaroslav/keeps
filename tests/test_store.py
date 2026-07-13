@@ -158,6 +158,16 @@ def test_trim_keeps_pinned(store):
     assert len(store.all()) == 3, "pinned clip plus max_items unpinned clips"
 
 
+def test_set_max_items_applies_the_new_limit_immediately(store):
+    store.add("text", {"text/plain": b"a"})
+    store.add("text", {"text/plain": b"b"})
+    store.add("text", {"text/plain": b"c"})
+
+    store.set_max_items(2)
+
+    assert len(store.all()) == 2
+
+
 @pytest.mark.parametrize(
     "needle,haystack,expected",
     [

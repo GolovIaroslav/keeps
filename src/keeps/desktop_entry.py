@@ -31,6 +31,8 @@ Comment=Clipboard manager
 Exec={exec_command}
 Icon=edit-paste
 Categories=Utility;
+StartupWMClass=keeps
+StartupNotify=true
 """
 
 

@@ -1,6 +1,6 @@
 import pytest
 
-from keeps.clip_archive import ArchiveClip, decode_archive, encode_archive
+from keeps.clip_archive import ArchiveClip, content_export, decode_archive, encode_archive
 from keeps.store import Store
 
 
@@ -26,6 +26,17 @@ def test_archive_roundtrip_preserves_every_mime_and_clip_metadata():
 
     assert payload[:2] == b"\x1f\x8b"
     assert decode_archive(payload) == clips
+
+
+def test_content_export_returns_the_actual_image_bytes_and_suffix():
+    assert content_export("image", {"image/png": b"png-bytes"}) == (".png", b"png-bytes")
+
+
+def test_content_export_returns_textual_canonical_format():
+    assert content_export("html", {"text/plain": b"plain", "text/html": b"<b>x</b>"}) == (
+        ".html",
+        b"<b>x</b>",
+    )
 
 
 @pytest.mark.parametrize(

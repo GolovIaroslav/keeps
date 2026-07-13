@@ -158,6 +158,8 @@ def _run_daemon(show_immediately: bool) -> int:
     desktop_entry.ensure_installed()
 
     qt_app = QApplication(sys.argv)
+    qt_app.setApplicationName("Keeps")
+    qt_app.setApplicationDisplayName("Keeps")
     qt_app.setDesktopFileName("keeps")  # associates KGlobalAccel/tray with our .desktop entry
     qt_app.setQuitOnLastWindowClosed(False)  # popup/settings hide, they don't end the daemon
     # One journal line to diagnose the login-autostart race: a daemon started
@@ -226,6 +228,42 @@ def _run_daemon(show_immediately: bool) -> int:
     else:
         print("warning: global hotkey registration failed; use `keeps toggle`", file=sys.stderr)
 
+    runtime_hotkey = {"value": hotkey}
+
+    def apply_runtime_settings() -> None:
+        """Apply settings that are owned by the already-running daemon."""
+        settings.sync()
+        store.set_max_items(int(config.get(settings, "general/max_items")))
+        watcher.set_max_item_mb(float(config.get(settings, "general/max_item_mb")))
+
+        desired_sequence = str(config.get(settings, "general/hotkey"))
+        current = runtime_hotkey["value"]
+        if current is not None and getattr(current, "key_sequence", None) == desired_sequence:
+            popup.apply_settings()
+            return
+        if current is not None:
+            current.unregister()
+        replacement = _make_hotkey(desired_sequence)
+        if replacement is not None:
+            replacement.triggered.connect(popup.toggle_popup)
+            if hasattr(replacement, "registration_failed"):
+                replacement.registration_failed.connect(
+                    lambda error: print(
+                        f"warning: global shortcut registration failed ({error}); "
+                        "bind `keeps toggle` in the compositor settings",
+                        file=sys.stderr,
+                    )
+                )
+        else:
+            print(
+                "warning: global hotkey registration failed after Apply; use `keeps toggle`",
+                file=sys.stderr,
+            )
+        runtime_hotkey["value"] = replacement
+        popup.apply_settings()
+
+    popup.set_settings_applier(apply_runtime_settings)
+
     clip_hotkeys = ClipGlobalHotkeyManager(popup.paste_clip_from_global_hotkey, qt_app)
     popup.set_clip_hotkey_manager(clip_hotkeys)
     clip_hotkeys.restore(store.clips_with_hotkeys(global_only=True))
@@ -256,6 +294,7 @@ def _run_daemon(show_immediately: bool) -> int:
             store,
             clip_hotkeys=clip_hotkeys,
             buffer_hotkeys=buffer_hotkeys,
+            apply_callback=apply_runtime_settings,
         ).exec()
         popup.refresh()
 
@@ -264,8 +303,8 @@ def _run_daemon(show_immediately: bool) -> int:
     def on_quit_requested() -> None:
         clip_hotkeys.deactivate_all()
         buffer_hotkeys.deactivate_all()
-        if hotkey is not None:
-            hotkey.unregister()
+        if runtime_hotkey["value"] is not None:
+            runtime_hotkey["value"].unregister()
         watcher.stop()
         qt_app.quit()
 

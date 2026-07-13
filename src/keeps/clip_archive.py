@@ -17,6 +17,13 @@ _CANONICAL_MIME = {
 }
 _VALID_KINDS = frozenset({"text", "html", "image", "files"})
 
+_CONTENT_EXPORTS = {
+    "text": (".txt", "text/plain"),
+    "html": (".html", "text/html"),
+    "image": (".png", "image/png"),
+    "files": (".txt", "text/uri-list"),
+}
+
 
 @dataclass(frozen=True)
 class ArchiveClip:
@@ -26,6 +33,21 @@ class ArchiveClip:
     mime_data: dict[str, bytes]
     pinned: bool = False
     alias: str | None = None
+
+
+def content_export(kind: str, mime_data: dict[str, bytes]) -> tuple[str, bytes]:
+    """Return the user-facing file suffix and canonical content for one clip."""
+    try:
+        suffix, mime = _CONTENT_EXPORTS[kind]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported clip kind: {kind}") from exc
+    if kind == "html" and mime not in mime_data:
+        mime = "text/plain"
+        suffix = ".txt"
+    try:
+        return suffix, mime_data[mime]
+    except KeyError as exc:
+        raise ValueError(f"Clip is missing {mime}") from exc
 
 
 def encode_archive(clips: list[ArchiveClip]) -> bytes:

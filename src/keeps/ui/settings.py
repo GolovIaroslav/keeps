@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -24,15 +27,18 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from keeps import __version__, autostart, config, diagnostics, multi_paste, paste
+from keeps import __version__, autostart, config, desktop_apps, diagnostics, multi_paste, paste
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
@@ -127,6 +133,59 @@ class _DownloadTask(QRunnable):
             self._signals.finished.emit(False, str(exc))
 
 
+class _ApplicationPicker(QDialog):
+    """A small Open-With style chooser backed by installed .desktop files."""
+
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(520, 460)
+        self._apps = desktop_apps.installed_applications()
+
+        layout = QVBoxLayout(self)
+        help_label = QLabel(
+            self.tr(
+                "Choose an installed application. Keeps will pass the temporary clip file to it."
+            )
+        )
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText(self.tr("Filter applications…"))
+        self._filter.textChanged.connect(self._refresh)
+        layout.addWidget(self._filter)
+
+        self._list = QListWidget()
+        self._list.itemDoubleClicked.connect(lambda _item: self.accept())
+        layout.addWidget(self._list)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        query = self._filter.text().casefold().strip()
+        self._list.clear()
+        for app in self._apps:
+            if query and query not in f"{app.name} {app.desktop_id}".casefold():
+                continue
+            item = QListWidgetItem(app.name)
+            item.setToolTip(f"{app.desktop_id}\n{app.exec_line}")
+            item.setData(Qt.ItemDataRole.UserRole, app)
+            self._list.addItem(item)
+        if self._list.count():
+            self._list.setCurrentRow(0)
+
+    def selected_application(self) -> desktop_apps.DesktopApplication | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+
 class SettingsDialog(QDialog):
     def __init__(
         self,
@@ -136,6 +195,7 @@ class SettingsDialog(QDialog):
         *,
         clip_hotkeys: ClipGlobalHotkeyManager | None = None,
         buffer_hotkeys: CopyBufferHotkeyManager | None = None,
+        apply_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(self.tr("Keeps Settings"))
@@ -144,22 +204,72 @@ class SettingsDialog(QDialog):
         self._store = store
         self._clip_hotkeys = clip_hotkeys
         self._buffer_hotkeys = buffer_hotkeys
+        self._apply_callback = apply_callback
 
         tabs = QTabWidget(self)
-        tabs.addTab(self._build_general_tab(), self.tr("General"))
-        tabs.addTab(self._build_keys_tab(), self.tr("Keys"))
-        tabs.addTab(self._build_clip_hotkeys_tab(), self.tr("Clip hotkeys"))
-        tabs.addTab(self._build_capture_tab(), self.tr("Capture"))
-        tabs.addTab(self._build_ai_tab(), self.tr("AI"))
-        tabs.addTab(self._build_diagnostics_tab(), self.tr("Diagnostics && About"))
+        for builder, title in (
+            (self._build_general_tab, "General"),
+            (self._build_paste_tab, "Paste"),
+            (self._build_keys_tab, "Keys"),
+            (self._build_clip_hotkeys_tab, "Clip hotkeys"),
+            (self._build_capture_tab, "Capture"),
+            (self._build_ai_tab, "AI"),
+            (self._build_diagnostics_tab, "Diagnostics && About"),
+        ):
+            tabs.addTab(self._scrollable_tab(builder()), self.tr(title))
 
+        apply_button = QPushButton(self.tr("Apply"))
+        apply_button.clicked.connect(self.apply_changes)
         close_button = QPushButton(self.tr("Close"))
         close_button.clicked.connect(self.close)
+        button_row = QHBoxLayout()
+        button_row.addWidget(apply_button)
+        button_row.addWidget(close_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
-        layout.addWidget(close_button)
-        self.resize(480, 420)
+        layout.addLayout(button_row)
+        self.setMinimumSize(400, 300)
+        screen = QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        width = min(620, max(440, available.width() - 32)) if available else 560
+        height = min(680, max(360, available.height() - 80)) if available else 600
+        self.resize(width, height)
+
+    @staticmethod
+    def _scrollable_tab(widget: QWidget) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        area.setWidget(widget)
+        return area
+
+    def apply_changes(self) -> None:
+        """Persist editor focus changes and reconfigure the running daemon."""
+        self._settings.sync()
+        if self._apply_callback is not None:
+            self._apply_callback()
+
+    def _help_button(self, text: str) -> QToolButton:
+        button = QToolButton()
+        button.setText("?")
+        button.setToolTip(text)
+        button.setStatusTip(text)
+        button.setAutoRaise(True)
+        button.setFixedSize(20, 20)
+        return button
+
+    def _section_heading(self, title: str, help_text: str) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(f"<b>{title}</b>")
+        layout.addWidget(label)
+        layout.addWidget(self._help_button(help_text))
+        layout.addStretch(1)
+        return widget
 
     def _save(self, key: str, value) -> None:
         self._settings.setValue(key, value)
@@ -174,17 +284,17 @@ class SettingsDialog(QDialog):
         max_items.setRange(10, 100_000)
         max_items.setValue(int(config.get(self._settings, "general/max_items")))
         max_items.valueChanged.connect(lambda v: self._save("general/max_items", v))
-        form.addRow(self.tr("Max history items (restart to apply)"), max_items)
+        form.addRow(self.tr("Max history items"), max_items)
 
         max_item_mb = QSpinBox()
         max_item_mb.setRange(1, 500)
         max_item_mb.setValue(int(config.get(self._settings, "general/max_item_mb")))
         max_item_mb.valueChanged.connect(lambda v: self._save("general/max_item_mb", v))
-        form.addRow(self.tr("Max item size, MB (restart to apply)"), max_item_mb)
+        form.addRow(self.tr("Max item size, MB"), max_item_mb)
 
         hotkey = QLineEdit(str(config.get(self._settings, "general/hotkey")))
         hotkey.editingFinished.connect(lambda: self._save("general/hotkey", hotkey.text()))
-        form.addRow(self.tr("Hotkey (restart to apply)"), hotkey)
+        form.addRow(self.tr("Hotkey"), hotkey)
 
         for key, label in (
             ("general/external_editor_text", self.tr("External editor — text")),
@@ -198,8 +308,19 @@ class SettingsDialog(QDialog):
                 if key == "general/external_diff"
                 else self.tr("xdg-open (system default)")
             )
-            editor.editingFinished.connect(lambda k=key, e=editor: self._save(k, e.text()))
-            form.addRow(label, editor)
+            editor.textChanged.connect(lambda value, k=key: self._save(k, value))
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(editor)
+            choose = QPushButton(self.tr("Choose…"))
+            choose.clicked.connect(
+                lambda _checked=False, k=key, e=editor, title=label: self._choose_application(
+                    k, e, title
+                )
+            )
+            row_layout.addWidget(choose)
+            form.addRow(label, row)
 
         theme_combo = QComboBox()
         theme_combo.addItems(["system", "light", "dark"])
@@ -265,22 +386,56 @@ class SettingsDialog(QDialog):
         delay.valueChanged.connect(lambda v: self._save("paste/delay_ms", v))
         form.addRow(self.tr("Paste delay"), delay)
 
-        shortcuts_group = QGroupBox(self.tr("Per-app paste shortcuts"))
-        shortcuts_layout = QVBoxLayout(shortcuts_group)
+        return widget
+
+    def _choose_application(self, key: str, editor: QLineEdit, label: str) -> None:
+        picker = _ApplicationPicker(self.tr("Choose application for {kind}").format(kind=label))
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+        application = picker.selected_application()
+        if application is not None:
+            editor.setText(application.exec_line)
+            editor.setToolTip(f"{application.name}: {application.exec_line}")
+            self._save(key, application.exec_line)
+
+    def _build_paste_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(
+            self._section_heading(
+                self.tr("Per-app paste shortcuts"),
+                self.tr(
+                    "Keeps remembers the application that was active before the popup opened. "
+                    "Terminal applications usually use Ctrl+Shift+V; regular applications use "
+                    "Ctrl+V. Application class is the window-manager identifier, not the visible "
+                    "window title. If detection fails, Keeps safely uses Ctrl+V."
+                ),
+            )
+        )
         shortcuts_help = QLabel(
             self.tr(
-                "The active app is detected before the popup opens. "
-                "Detection failure uses Ctrl+V."
+                "These are only paste-key choices. They do not launch applications and they do "
+                "not affect the global Keeps hotkey. Add the class reported by your window manager."
             )
         )
         shortcuts_help.setWordWrap(True)
-        shortcuts_layout.addWidget(shortcuts_help)
+        layout.addWidget(shortcuts_help)
         shortcuts = QTableWidget(0, 2)
         shortcuts.setHorizontalHeaderLabels([self.tr("Application class"), self.tr("Shortcut")])
         shortcuts.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         shortcuts.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
+        shortcuts.horizontalHeaderItem(0).setToolTip(
+            self.tr(
+                "The app/window class reported by kdotool or xdotool, for example org.kde.konsole."
+            )
+        )
+        shortcuts.horizontalHeaderItem(1).setToolTip(
+            self.tr("The paste key expected by that app: ctrl+v or ctrl+shift+v.")
+        )
+        shortcuts.setMinimumHeight(120)
+        shortcuts.setMaximumHeight(260)
         mapping = paste.parse_app_shortcuts(
             str(config.get(self._settings, "paste/app_shortcuts"))
         )
@@ -304,7 +459,7 @@ class SettingsDialog(QDialog):
             self._save("paste/app_shortcuts", paste.format_app_shortcuts(values))
 
         shortcuts.itemChanged.connect(lambda _item: save_shortcuts())
-        shortcuts_layout.addWidget(shortcuts)
+        layout.addWidget(shortcuts)
         shortcut_buttons = QHBoxLayout()
         add_shortcut = QPushButton(self.tr("Add"))
         remove_shortcut = QPushButton(self.tr("Remove selected"))
@@ -327,9 +482,8 @@ class SettingsDialog(QDialog):
         shortcut_buttons.addWidget(add_shortcut)
         shortcut_buttons.addWidget(remove_shortcut)
         shortcut_buttons.addStretch(1)
-        shortcuts_layout.addLayout(shortcut_buttons)
-        form.addRow(shortcuts_group)
-
+        layout.addLayout(shortcut_buttons)
+        layout.addStretch(1)
         return widget
 
     def _on_theme_changed(self, value: str) -> None:

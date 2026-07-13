@@ -53,6 +53,9 @@ class WaylandWatcher(QObject):
     def start(self) -> None:
         self._process.start()
 
+    def set_max_item_mb(self, max_item_mb: float) -> None:
+        self._max_item_mb = max_item_mb
+
     def stop(self) -> None:
         self._process.terminate()
         self._process.waitForFinished(1000)

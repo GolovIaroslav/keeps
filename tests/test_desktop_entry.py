@@ -10,6 +10,7 @@ def test_ensure_installed_creates_desktop_file(tmp_path):
     text = path.read_text()
     assert "Type=Application" in text
     assert f"Exec={launch_command()}" in text
+    assert "StartupWMClass=keeps" in text
 
 
 def test_ensure_installed_is_idempotent(tmp_path):
