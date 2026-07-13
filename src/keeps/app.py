@@ -141,6 +141,7 @@ def _run_daemon(show_immediately: bool) -> int:
 
     from keeps import desktop_entry
     from keeps.ai.runtime import AiRuntime
+    from keeps.hotkey.clips import ClipGlobalHotkeyManager
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
     from keeps.ui.thumbnails import ThumbnailRuntime
@@ -209,6 +210,10 @@ def _run_daemon(show_immediately: bool) -> int:
     else:
         print("warning: global hotkey registration failed; use `keeps toggle`", file=sys.stderr)
 
+    clip_hotkeys = ClipGlobalHotkeyManager(popup.paste_clip_from_global_hotkey, qt_app)
+    popup.set_clip_hotkey_manager(clip_hotkeys)
+    clip_hotkeys.restore(store.clips_with_hotkeys(global_only=True))
+
     tray = TrayIcon()
     tray.show_requested.connect(popup.show_popup)
 
@@ -221,12 +226,13 @@ def _run_daemon(show_immediately: bool) -> int:
     tray.capture_paused_changed.connect(on_capture_paused_changed)
 
     def on_settings_requested() -> None:
-        SettingsDialog(ai_runtime, store).exec()
+        SettingsDialog(ai_runtime, store, clip_hotkeys=clip_hotkeys).exec()
         popup.refresh()
 
     tray.settings_requested.connect(on_settings_requested)
 
     def on_quit_requested() -> None:
+        clip_hotkeys.deactivate_all()
         if hotkey is not None:
             hotkey.unregister()
         watcher.stop()

@@ -50,7 +50,7 @@ PREVIEW_MAX_CHARS = 300
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
 # entries for v2 and beyond.
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 
 def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
@@ -75,9 +75,19 @@ def _migrate_v3_alias(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN alias TEXT")
 
 
+def _migrate_v4_clip_hotkeys(conn: sqlite3.Connection) -> None:
+    """Add the optional per-clip shortcut and its global/local scope."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    if "hotkey" not in columns:
+        conn.execute("ALTER TABLE clips ADD COLUMN hotkey TEXT")
+    if "hotkey_global" not in columns:
+        conn.execute("ALTER TABLE clips ADD COLUMN hotkey_global INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v2_groups,
     3: _migrate_v3_alias,
+    4: _migrate_v4_clip_hotkeys,
 }
 
 BACKUP_KEEP = 3
@@ -119,6 +129,8 @@ class Clip:
     group_id: int | None = None
     manual_order: float | None = None
     alias: str | None = None
+    hotkey: str | None = None
+    hotkey_global: bool = False
 
 
 @dataclass(frozen=True)
@@ -560,6 +572,37 @@ class Store:
         self._conn.commit()
         self._search_index.update_alias(clip_id, alias or "")
 
+    def set_hotkey(self, clip_id: int, hotkey: str | None, *, global_hotkey: bool) -> None:
+        """Persist one optional shortcut per clip.
+
+        Conflict detection and actual KGlobalAccel registration live in the
+        UI/runtime layer: SQLite only owns the durable assignment.
+        """
+        hotkey = hotkey.strip() if hotkey else None
+        self._conn.execute(
+            "UPDATE clips SET hotkey = ?, hotkey_global = ? WHERE id = ?",
+            (hotkey, int(bool(hotkey) and global_hotkey), clip_id),
+        )
+        self._conn.commit()
+
+    def hotkey_conflict(self, hotkey: str, *, exclude_clip_id: int | None = None) -> int | None:
+        """Return another clip using `hotkey`, if one is assigned."""
+        row = self._conn.execute(
+            "SELECT id FROM clips WHERE hotkey = ? AND (? IS NULL OR id != ?)",
+            (hotkey, exclude_clip_id, exclude_clip_id),
+        ).fetchone()
+        return row["id"] if row is not None else None
+
+    def clips_with_hotkeys(self, *, global_only: bool = False) -> list[Clip]:
+        """Assigned clips in the ordinary history order, optionally global only."""
+        where = "hotkey IS NOT NULL"
+        if global_only:
+            where += " AND hotkey_global = 1"
+        rows = self._conn.execute(
+            f"SELECT * FROM clips WHERE {where} ORDER BY last_used_at DESC, id DESC"
+        ).fetchall()
+        return [self._row_to_clip(row) for row in rows]
+
     def get_thumbnail_source(self, clip_id: int) -> tuple[str, bytes] | None:
         """Return the current image content hash and full PNG for thumbnail work."""
         row = self._conn.execute(
@@ -665,4 +708,6 @@ class Store:
             group_id=row["group_id"],
             manual_order=row["manual_order"],
             alias=row["alias"],
+            hotkey=row["hotkey"],
+            hotkey_global=bool(row["hotkey_global"]),
         )

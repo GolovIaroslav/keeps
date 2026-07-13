@@ -1,4 +1,4 @@
-"""Settings dialog: General / Capture / AI / Diagnostics & About (PLAN.md §7)."""
+"""Settings dialog, including the per-clip hotkey overview (PLAN.md §7/Ф20)."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from keeps import __version__, autostart, config, diagnostics, multi_paste, paste
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
+from keeps.hotkey.clips import ClipGlobalHotkeyManager
 from keeps.store import Store
 
 ABOUT_HTML = """\
@@ -123,15 +124,19 @@ class SettingsDialog(QDialog):
         ai_runtime: AiRuntime | None = None,
         store: Store | None = None,
         parent: QWidget | None = None,
+        *,
+        clip_hotkeys: ClipGlobalHotkeyManager | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(self.tr("Keeps Settings"))
         self._settings = config.open_settings()
         self._ai_runtime = ai_runtime
         self._store = store
+        self._clip_hotkeys = clip_hotkeys
 
         tabs = QTabWidget(self)
         tabs.addTab(self._build_general_tab(), self.tr("General"))
+        tabs.addTab(self._build_clip_hotkeys_tab(), self.tr("Clip hotkeys"))
         tabs.addTab(self._build_capture_tab(), self.tr("Capture"))
         tabs.addTab(self._build_ai_tab(), self.tr("AI"))
         tabs.addTab(self._build_diagnostics_tab(), self.tr("Diagnostics && About"))
@@ -313,6 +318,65 @@ class SettingsDialog(QDialog):
     def _on_theme_changed(self, value: str) -> None:
         self._save("general/theme", value)
         config.apply_theme(value)
+
+    # -- Clip hotkeys -------------------------------------------------
+
+    def _build_clip_hotkeys_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        explanation = QLabel(
+            self.tr(
+                "Assign hotkeys in a clip's Properties. Local hotkeys work only while "
+                "the popup is open; global hotkeys paste directly into the active app."
+            )
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self._clip_hotkey_table = QTableWidget(0, 4)
+        self._clip_hotkey_table.setHorizontalHeaderLabels(
+            [self.tr("Clip"), self.tr("Hotkey"), self.tr("Scope"), self.tr("Action")]
+        )
+        self._clip_hotkey_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        for column in (1, 2, 3):
+            self._clip_hotkey_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        layout.addWidget(self._clip_hotkey_table)
+        self._refresh_clip_hotkey_table()
+        return widget
+
+    def _refresh_clip_hotkey_table(self) -> None:
+        table = self._clip_hotkey_table
+        table.setRowCount(0)
+        if self._store is None:
+            return
+        for clip in self._store.clips_with_hotkeys():
+            row = table.rowCount()
+            table.insertRow(row)
+            title = clip.alias or clip.preview.replace("\n", " ") or self.tr("(empty clip)")
+            table.setItem(row, 0, QTableWidgetItem(title))
+            table.setItem(row, 1, QTableWidgetItem(clip.hotkey or ""))
+            scope = self.tr("Global") if clip.hotkey_global else self.tr("Popup only")
+            table.setItem(row, 2, QTableWidgetItem(scope))
+            remove = QPushButton(self.tr("Remove"))
+            remove.clicked.connect(
+                lambda _checked=False, clip_id=clip.id: self._clear_hotkey(clip_id)
+            )
+            table.setCellWidget(row, 3, remove)
+
+    def _clear_hotkey(self, clip_id: int) -> None:
+        if self._store is None:
+            return
+        clip = next((clip for clip in self._store.all() if clip.id == clip_id), None)
+        if clip is None:
+            self._refresh_clip_hotkey_table()
+            return
+        if clip.hotkey_global and self._clip_hotkeys is not None:
+            self._clip_hotkeys.unregister(clip_id)
+        self._store.set_hotkey(clip_id, None, global_hotkey=False)
+        self._refresh_clip_hotkey_table()
 
     # -- Capture ---------------------------------------------------------
 
@@ -752,7 +816,17 @@ class SettingsDialog(QDialog):
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
 
+        clips_to_delete = [
+            clip
+            for clip in self._store.all()
+            if include_pinned_box.isChecked() or not clip.pinned
+        ]
         deleted = self._store.clear_history(include_pinned=include_pinned_box.isChecked())
+        if self._clip_hotkeys is not None:
+            for clip in clips_to_delete:
+                if clip.hotkey_global:
+                    self._clip_hotkeys.unregister(clip.id)
+        self._refresh_clip_hotkey_table()
         QMessageBox.information(
             self,
             self.tr("History cleared"),

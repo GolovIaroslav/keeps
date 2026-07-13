@@ -24,7 +24,16 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QGuiApplication, QIcon, QImage, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import (
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QShortcut,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -43,6 +52,8 @@ from PySide6.QtWidgets import (
 from keeps import config, multi_paste, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
+from keeps.hotkey.clip_registry import MAX_GLOBAL_CLIP_HOTKEYS
+from keeps.hotkey.clips import ClipGlobalHotkeyManager
 from keeps.search import MatchReason, remember_query
 from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
@@ -96,6 +107,59 @@ _NAV_KEYS = {
     Qt.Key.Key_Home,
     Qt.Key.Key_End,
 }
+
+# Local clip shortcuts share the popup's window context with the normative
+# §6 keymap. Do not let an assignment silently shadow an existing command.
+_RESERVED_LOCAL_HOTKEYS = {
+    QKeySequence(key).toString(QKeySequence.SequenceFormat.PortableText)
+    for key in (
+        "Esc",
+        "Return",
+        "Enter",
+        "Shift+Return",
+        "Shift+Enter",
+        "Alt+Return",
+        "Alt+Enter",
+        "Ctrl+A",
+        "Ctrl+C",
+        "Ctrl+E",
+        "Ctrl+M",
+        "Ctrl+P",
+        "Ctrl+Tab",
+        "Ctrl+Shift+Tab",
+        "Ctrl+Backtab",
+        "Ctrl+`",
+        "Ctrl++",
+        "Ctrl+=",
+        "Ctrl+-",
+        "Up",
+        "Down",
+        "PgUp",
+        "PgDown",
+        "Home",
+        "End",
+        "F2",
+        "F3",
+        "Del",
+        *(f"Ctrl+{number}" for number in range(1, 10)),
+    )
+}
+
+_LOCAL_HOTKEY_MODIFIERS = (
+    Qt.KeyboardModifier.ControlModifier
+    | Qt.KeyboardModifier.AltModifier
+    | Qt.KeyboardModifier.MetaModifier
+)
+
+
+def _local_hotkey_error(sequence_text: str) -> str | None:
+    """Return why a local shortcut would interfere with normal popup input."""
+    if sequence_text in _RESERVED_LOCAL_HOTKEYS:
+        return "reserved"
+    sequence = QKeySequence(sequence_text)
+    if sequence[0].keyboardModifiers() & _LOCAL_HOTKEY_MODIFIERS:
+        return None
+    return "modifier-required"
 
 _MODE_BADGE_LABELS = {
     ranking.SearchMode.BLENDED: "blended",
@@ -300,7 +364,12 @@ class PopupWindow(QWidget):
     thumbnail_requested = Signal(int, str)  # (clip_id, kind), after an image edit
 
     def __init__(
-        self, store: Store, ai_runtime: AiRuntime | None = None, parent: QWidget | None = None
+        self,
+        store: Store,
+        ai_runtime: AiRuntime | None = None,
+        parent: QWidget | None = None,
+        *,
+        clip_hotkeys: ClipGlobalHotkeyManager | None = None,
     ) -> None:
         # Qt.WindowType.Popup would give us free hide-on-outside-click, but its
         # Wayland grab requires a focused transient parent — we have none (a
@@ -319,6 +388,8 @@ class PopupWindow(QWidget):
         self._search_history = self._load_search_history()
         self._preserve_search_once = False
         self._target_app_class: str | None = None
+        self._clip_hotkeys = clip_hotkeys
+        self._local_hotkeys: dict[int, QShortcut] = {}
         self.model = ClipListModel(store, ai_runtime)
 
         self.search_edit = QLineEdit(self)
@@ -417,6 +488,7 @@ class PopupWindow(QWidget):
         self._apply_ui_scale()
 
         self.paste_requested.connect(self._schedule_paste_injection)
+        self._refresh_local_hotkeys()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -437,6 +509,44 @@ class PopupWindow(QWidget):
         self.raise_()
         self.activateWindow()
         self.search_edit.setFocus()
+
+    def set_clip_hotkey_manager(self, manager: ClipGlobalHotkeyManager) -> None:
+        """Attach the daemon-owned global action registry after popup creation."""
+        self._clip_hotkeys = manager
+
+    def _hotkey_error_text(self, error: str) -> str:
+        messages = {
+            "no-session-dbus": self.tr("No session D-Bus connection."),
+            "kglobalaccel-unavailable": self.tr(
+                "Global hotkeys require KDE Plasma's KGlobalAccel service."
+            ),
+            "invalid": self.tr("The shortcut is invalid."),
+            "availability-check-failed": self.tr(
+                "Could not check whether this global shortcut is available."
+            ),
+            "conflict": self.tr("This global shortcut is already in use."),
+            "registration-failed": self.tr("KGlobalAccel could not register this shortcut."),
+            "component-failed": self.tr("KGlobalAccel could not create the shortcut action."),
+            "signal-connection-failed": self.tr(
+                "KGlobalAccel could not receive shortcut events."
+            ),
+            "limit": self.tr(
+                "At most {limit} clip global hotkeys are supported."
+            ).format(limit=MAX_GLOBAL_CLIP_HOTKEYS),
+        }
+        return messages.get(error, self.tr("Could not register this global shortcut."))
+
+    def paste_clip_from_global_hotkey(self, clip_id: int) -> None:
+        """Paste directly into the currently active app without showing the popup."""
+        if not any(clip.id == clip_id for clip in self.store.all()):
+            if self._clip_hotkeys is not None:
+                self._clip_hotkeys.unregister(clip_id)
+            return
+        backend = paste.session_backend()
+        self._target_app_class = paste.active_app_class(
+            backend, shutil.which, subprocess.run
+        )
+        self._activate_id(clip_id, plain_only=False, want_paste=True)
 
     def toggle_popup(self) -> None:
         if self.isVisible():
@@ -499,9 +609,11 @@ class PopupWindow(QWidget):
         return super().event(event)
 
     def refresh(self) -> None:
+        self._prune_deleted_global_hotkeys()
         self.model.set_query(self.search_edit.text())
         self._update_count_label()
         self._prune_thumbnail_cache()
+        self._refresh_local_hotkeys()
 
     def _update_count_label(self) -> None:
         scope = str(self.tabs.tabData(self.tabs.currentIndex()))
@@ -542,6 +654,50 @@ class PopupWindow(QWidget):
     def on_clip_captured(self, _clip_id: int, _kind: str) -> None:
         """Drop cached pixmaps for clips removed by Store.trim() during capture."""
         self._prune_thumbnail_cache()
+        self._prune_deleted_global_hotkeys()
+        self._refresh_local_hotkeys()
+
+    def _refresh_local_hotkeys(self) -> None:
+        """Rebuild the popup-only shortcut table from durable clip assignments."""
+        assignments = {
+            clip.id: clip.hotkey
+            for clip in self.store.clips_with_hotkeys()
+            if clip.hotkey and not clip.hotkey_global
+        }
+        for clip_id in set(self._local_hotkeys) - set(assignments):
+            shortcut = self._local_hotkeys.pop(clip_id)
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        for clip_id, sequence in assignments.items():
+            shortcut = self._local_hotkeys.get(clip_id)
+            if shortcut is not None and shortcut.key().toString(
+                QKeySequence.SequenceFormat.PortableText
+            ) == sequence:
+                continue
+            if shortcut is not None:
+                shortcut.setEnabled(False)
+                shortcut.deleteLater()
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(
+                lambda clip_id=clip_id: self._activate_local_hotkey(clip_id)
+            )
+            self._local_hotkeys[clip_id] = shortcut
+
+    def _activate_local_hotkey(self, clip_id: int) -> None:
+        if self.isVisible():
+            self._activate_id(clip_id, plain_only=False, want_paste=True)
+
+    def _prune_deleted_global_hotkeys(self) -> None:
+        if self._clip_hotkeys is not None:
+            self._clip_hotkeys.prune({clip.id for clip in self.store.all()})
+
+    def _update_clip_content(self, clip_id: int, mime_data: dict[str, bytes]) -> int:
+        """Edit a clip and immediately release its action if dedup deletes it."""
+        result_id = self.store.update_content(clip_id, mime_data)
+        if result_id != clip_id and self._clip_hotkeys is not None:
+            self._clip_hotkeys.unregister(clip_id)
+        return result_id
 
     def _prune_thumbnail_cache(self) -> None:
         self._delegate.prune_thumbnail_cache({clip.id for clip in self.store.all()})
@@ -909,6 +1065,7 @@ class PopupWindow(QWidget):
             combined_id = self.store.add("text", combined_data)
             if self._ai_runtime is not None:
                 self._ai_runtime.on_clip_captured(combined_id, "text")
+            self._prune_deleted_global_hotkeys()
         if want_paste:
             for clip_id in result.clip_ids:
                 self.model.mark_pasted(clip_id)
@@ -997,6 +1154,8 @@ class PopupWindow(QWidget):
                 return
         for clip_id in clip_ids:
             self._delegate.invalidate_thumbnail(clip_id)
+            if self._clip_hotkeys is not None:
+                self._clip_hotkeys.unregister(clip_id)
         self.store.delete_many(clip_ids)
         self.refresh()
         self._select_row(min(self._current_row() or 0, self.model.rowCount() - 1))
@@ -1004,7 +1163,9 @@ class PopupWindow(QWidget):
     def _open_settings(self) -> None:
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
         # Settings behaves identically whether opened from the tray or here.
-        SettingsDialog(self._ai_runtime, self.store).exec()
+        SettingsDialog(
+            self._ai_runtime, self.store, clip_hotkeys=self._clip_hotkeys
+        ).exec()
         self.refresh()
         # Qt doesn't reliably restore focus to search_edit after a modal
         # dialog closes; _handle_key only fires for events targeting
@@ -1134,8 +1295,60 @@ class PopupWindow(QWidget):
         if dialog.exec() != PropertiesDialog.DialogCode.Accepted:
             self.search_edit.setFocus()
             return
+        hotkey = dialog.hotkey()
+        hotkey_is_global = dialog.hotkey_is_global()
+        local_error = _local_hotkey_error(hotkey) if hotkey and not hotkey_is_global else None
+        if local_error == "reserved":
+            QMessageBox.warning(
+                self,
+                self.tr("Hotkey already assigned"),
+                self.tr("This shortcut is reserved by the popup keymap."),
+            )
+            self.search_edit.setFocus()
+            return
+        if local_error == "modifier-required":
+            QMessageBox.warning(
+                self,
+                self.tr("Hotkey needs a modifier"),
+                self.tr("Local clip hotkeys must include Ctrl, Alt, or Meta."),
+            )
+            self.search_edit.setFocus()
+            return
+        if hotkey:
+            conflict_id = self.store.hotkey_conflict(hotkey, exclude_clip_id=clip_id)
+            if conflict_id is not None:
+                QMessageBox.warning(
+                    self,
+                    self.tr("Hotkey already assigned"),
+                    self.tr("This shortcut is already assigned to clip #{clip_id}.").format(
+                        clip_id=conflict_id
+                    ),
+                )
+                self.search_edit.setFocus()
+                return
+        if hotkey_is_global:
+            if self._clip_hotkeys is None:
+                QMessageBox.warning(
+                    self,
+                    self.tr("Global hotkey unavailable"),
+                    self.tr("Global clip hotkeys are available only in the running daemon."),
+                )
+                self.search_edit.setFocus()
+                return
+            error = self._clip_hotkeys.register(clip_id, hotkey or "")
+            if error:
+                QMessageBox.warning(
+                    self,
+                    self.tr("Global hotkey unavailable"),
+                    self._hotkey_error_text(error),
+                )
+                self.search_edit.setFocus()
+                return
+        elif clip.hotkey_global and self._clip_hotkeys is not None:
+            self._clip_hotkeys.unregister(clip_id)
         self.store.set_alias(clip_id, dialog.alias())
         self.store.set_pinned(clip_id, dialog.pinned())
+        self.store.set_hotkey(clip_id, hotkey, global_hotkey=hotkey_is_global)
         self.refresh()
         for row in range(self.model.rowCount()):
             if self.model.clip_at(row).id == clip_id:
@@ -1165,7 +1378,9 @@ class PopupWindow(QWidget):
         text = self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
         dialog = EditDialog(text, self)
         if dialog.exec():
-            self.store.update_content(clip.id, {"text/plain": dialog.text().encode("utf-8")})
+            self._update_clip_content(
+                clip.id, {"text/plain": dialog.text().encode("utf-8")}
+            )
             self.refresh()
         self.search_edit.setFocus()
 
@@ -1203,7 +1418,7 @@ class PopupWindow(QWidget):
         if kind == "text":
             with open(path, encoding="utf-8") as f:
                 new_text = f.read()
-            result_id = self.store.update_content(
+            result_id = self._update_clip_content(
                 clip_id, {"text/plain": new_text.encode("utf-8")}
             )
         else:
@@ -1211,13 +1426,13 @@ class PopupWindow(QWidget):
                 new_bytes = f.read()
             if kind == "image":
                 self._delegate.invalidate_thumbnail(clip_id)
-                result_id = self.store.update_content(clip_id, {"image/png": new_bytes})
+                result_id = self._update_clip_content(clip_id, {"image/png": new_bytes})
             else:
                 mime_data = self.store.get_data(clip_id).copy()
                 # Preserve the plain-text fallback; deriving it from edited
                 # HTML is out of scope.
                 mime_data["text/html"] = new_bytes
-                result_id = self.store.update_content(clip_id, mime_data)
+                result_id = self._update_clip_content(clip_id, mime_data)
         if kind == "image":
             self.thumbnail_requested.emit(result_id, kind)
         self.refresh()

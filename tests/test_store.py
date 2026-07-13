@@ -436,8 +436,9 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     def add_dummy_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN dummy TEXT")
 
-    monkeypatch.setattr(store_module, "LATEST_VERSION", 4)
-    monkeypatch.setattr(store_module, "MIGRATIONS", {4: add_dummy_column})
+    target_version = store_module.LATEST_VERSION + 1
+    monkeypatch.setattr(store_module, "LATEST_VERSION", target_version)
+    monkeypatch.setattr(store_module, "MIGRATIONS", {target_version: add_dummy_column})
 
     s2 = Store(db_path, max_items=500)
     clips = s2.all()
@@ -449,7 +450,7 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     conn.close()
 
     assert [c.preview for c in clips] == ["before migration"]
-    assert version == 4
+    assert version == target_version
     assert "dummy" in columns
     backups = list(tmp_path.glob("keeps.db.backup-*"))
     assert len(backups) == 1
@@ -476,8 +477,8 @@ def test_v1_migration_adds_groups_and_manual_order_with_backup(tmp_path):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     conn.close()
-    assert version == 3
-    assert {"group_id", "manual_order", "alias"} <= columns
+    assert version == store_module.LATEST_VERSION
+    assert {"group_id", "manual_order", "alias", "hotkey", "hotkey_global"} <= columns
     assert "groups" in tables
     assert clip.preview == "survives" and clip.group_id is None
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
@@ -593,9 +594,75 @@ def test_v2_to_v3_alias_migration_backs_up_and_preserves_clips(tmp_path):
     assert clip.preview == "survives v3" and clip.alias is None
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert "alias" in {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store_module.LATEST_VERSION
+    assert {"alias", "hotkey", "hotkey_global"} <= {
+        row[1] for row in conn.execute("PRAGMA table_info(clips)")
+    }
     conn.close()
+
+
+def test_clip_hotkey_roundtrip_and_global_listing(store):
+    local_id = store.add("text", {"text/plain": b"local"})
+    global_id = store.add("text", {"text/plain": b"global"})
+
+    store.set_hotkey(local_id, "Ctrl+1", global_hotkey=False)
+    store.set_hotkey(global_id, "Meta+G", global_hotkey=True)
+
+    clips = {clip.id: clip for clip in store.all()}
+    assert clips[local_id].hotkey == "Ctrl+1"
+    assert clips[local_id].hotkey_global is False
+    assert clips[global_id].hotkey == "Meta+G"
+    assert clips[global_id].hotkey_global is True
+    assert [clip.id for clip in store.clips_with_hotkeys(global_only=True)] == [global_id]
+
+
+def test_clearing_clip_hotkey_also_clears_global_flag(store):
+    clip_id = store.add("text", {"text/plain": b"assigned"})
+    store.set_hotkey(clip_id, "Meta+G", global_hotkey=True)
+
+    store.set_hotkey(clip_id, None, global_hotkey=True)
+
+    clip = store.all()[0]
+    assert clip.hotkey is None
+    assert clip.hotkey_global is False
+
+
+def test_clip_hotkey_conflict_excludes_the_clip_being_edited(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    store.set_hotkey(first, "Ctrl+1", global_hotkey=False)
+
+    assert store.hotkey_conflict("Ctrl+1") == first
+    assert store.hotkey_conflict("Ctrl+1", exclude_clip_id=first) is None
+    assert store.hotkey_conflict("Ctrl+1", exclude_clip_id=second) == first
+
+
+def test_v3_to_v4_hotkey_migration_backs_up_and_preserves_clips(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store_module.SCHEMA)
+    store_module._migrate_v2_groups(conn)
+    store_module._migrate_v3_alias(conn)
+    conn.execute("PRAGMA user_version = 3")
+    conn.execute(
+        "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
+        "VALUES (0, 0, 'text', 'survives v4', 'h', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(db_path)
+    clip = migrated.all()[0]
+    migrated.close()
+
+    assert clip.preview == "survives v4"
+    assert clip.hotkey is None and clip.hotkey_global is False
+    assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    conn.close()
+    assert {"hotkey", "hotkey_global"} <= columns
 
 
 def test_mime_sizes_report_exact_stored_bytes(store):
