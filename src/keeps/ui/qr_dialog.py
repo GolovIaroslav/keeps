@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
 
@@ -16,19 +16,20 @@ def qr_matrix(text: str) -> list[list[bool]]:
     return code.get_matrix()
 
 
-def qr_image(text: str, scale: int = 8) -> QImage:
+def qr_image(text: str, scale: int = 8, max_size: int = 720) -> QImage:
     matrix = qr_matrix(text)
     size = len(matrix)
+    scale = max(1, min(scale, max_size // size))
     image = QImage(size * scale, size * scale, QImage.Format.Format_RGB32)
     image.fill(QColor("white"))
-    black = QColor("black").rgb()
+    painter = QPainter(image)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("black"))
     for y, row in enumerate(matrix):
         for x, filled in enumerate(row):
-            if not filled:
-                continue
-            for py in range(y * scale, (y + 1) * scale):
-                for px in range(x * scale, (x + 1) * scale):
-                    image.setPixel(px, py, black)
+            if filled:
+                painter.drawRect(x * scale, y * scale, scale, scale)
+    painter.end()
     return image
 
 

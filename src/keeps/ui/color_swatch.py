@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import math
 import re
 
 RGB = tuple[int, int, int]
@@ -28,11 +29,14 @@ def parse_color(text: str) -> RGB | None:
         if len(parts) != 3 or not parts[1].endswith("%") or not parts[2].endswith("%"):
             return None
         try:
-            hue = float(parts[0]) % 360 / 360
+            raw_hue = float(parts[0])
             saturation = float(parts[1][:-1]) / 100
             lightness = float(parts[2][:-1]) / 100
         except ValueError:
             return None
+        if not all(math.isfinite(value) for value in (raw_hue, saturation, lightness)):
+            return None
+        hue = raw_hue % 360 / 360
         if not 0 <= saturation <= 1 or not 0 <= lightness <= 1:
             return None
         red, green, blue = colorsys.hls_to_rgb(hue, lightness, saturation)
@@ -42,7 +46,13 @@ def parse_color(text: str) -> RGB | None:
 
 def _parse_rgb_channel(value: str) -> int | None:
     try:
-        channel = round(float(value[:-1]) * 255 / 100) if value.endswith("%") else int(value)
-    except ValueError:
+        if value.endswith("%"):
+            percentage = float(value[:-1])
+            if not math.isfinite(percentage):
+                return None
+            channel = round(percentage * 255 / 100)
+        else:
+            channel = int(value)
+    except (OverflowError, ValueError):
         return None
     return channel if 0 <= channel <= 255 else None

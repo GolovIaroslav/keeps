@@ -18,6 +18,18 @@ def test_parse_color(text, expected):
     assert parse_color(text) == expected
 
 
-@pytest.mark.parametrize("text", ["", "#12", "rgb(300,0,0)", "hsl(0,20,30)", "hello"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "#12",
+        "rgb(300,0,0)",
+        "rgb(inf%,0%,0%)",
+        "hsl(0,20,30)",
+        "hsl(nan,100%,50%)",
+        "hsl(inf,100%,50%)",
+        "hello",
+    ],
+)
 def test_parse_color_rejects_non_colors(text):
     assert parse_color(text) is None

@@ -378,6 +378,7 @@ class PopupWindow(QWidget):
         title_bar_layout.setContentsMargins(2, 0, 2, 0)
         self._count_label = QLabel(self._title_bar)
         title_bar_layout.addWidget(self._count_label)
+        self.model.modelReset.connect(self._update_count_label)
         title_bar_layout.addStretch(1)
         settings_button = QToolButton(self._title_bar)
         settings_button.setIcon(QIcon.fromTheme("configure"))
