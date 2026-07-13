@@ -1,6 +1,24 @@
+import uuid
+from datetime import datetime
+
 import pytest
 
-from keeps.ui.text_transform import TRANSFORMS, capitalize, to_lower, to_upper, trim_whitespace
+from keeps.ui.text_transform import (
+    TRANSFORMS,
+    append_timestamp,
+    camel_case,
+    capitalize,
+    invert_case,
+    is_valid_json,
+    new_guid,
+    pretty_json,
+    remove_line_feeds,
+    sentence_case,
+    slugify,
+    to_lower,
+    to_upper,
+    trim_whitespace,
+)
 
 UPPER_CASES = [
     ("", ""),
@@ -62,3 +80,69 @@ def test_transforms_registry_matches_functions():
     assert TRANSFORMS["lowercase"] is to_lower
     assert TRANSFORMS["Capitalize"] is capitalize
     assert TRANSFORMS["Trim whitespace"] is trim_whitespace
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("", ""), ("a\n\nb", "a b"), ("  привет\r\n  мир  ", "привет мир")],
+)
+def test_remove_line_feeds(text, expected):
+    assert remove_line_feeds(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("", ""), ("hELLO WORLD", "Hello world"), ("  пРИВЕТ МИР", "  Привет мир")],
+)
+def test_sentence_case(text, expected):
+    assert sentence_case(text) == expected
+
+
+def test_invert_case_handles_cyrillic_and_empty():
+    assert invert_case("Hello ПРИВЕТ") == "hELLO привет"
+    assert invert_case("") == ""
+
+
+def test_append_timestamp_uses_decided_end_position_and_minute_format():
+    now = datetime(2026, 7, 13, 14, 5)
+    assert append_timestamp("clip", now) == "clip 2026-07-13 14:05"
+    assert append_timestamp("", now) == "2026-07-13 14:05"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Привет, мир!", "privet-mir"),
+        ("Ёж и щука", "yozh-i-shchuka"),
+        ("Hello  world", "hello-world"),
+        ("", ""),
+    ],
+)
+def test_slugify_transliterates_russian(text, expected):
+    assert slugify(text) == expected
+
+
+def test_new_guid_ignores_source_text():
+    expected = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    assert new_guid("ignored", lambda: expected) == str(expected)
+
+
+def test_json_pretty_print_and_validation():
+    source = '{"message":"привет","items":[1,2]}'
+    assert is_valid_json(source) is True
+    assert pretty_json(source) == '{\n  "message": "привет",\n  "items": [\n    1,\n    2\n  ]\n}'
+    assert is_valid_json("") is False
+    assert pretty_json("not json") == "not json"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("hello world", "helloWorld"),
+        ("Привет мир", "приветМир"),
+        ("JSON_value", "jsonValue"),
+        ("", ""),
+    ],
+)
+def test_camel_case(text, expected):
+    assert camel_case(text) == expected

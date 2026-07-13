@@ -734,7 +734,16 @@ class PopupWindow(QWidget):
             menu.addSeparator()
             special_menu = menu.addMenu(self.tr("Special Paste"))
             for label, transform in text_transform.TRANSFORMS.items():
-                special_menu.addAction(label, lambda t=transform: self._special_paste(row, t))
+                action = special_menu.addAction(
+                    label,
+                    lambda _checked=False, t=transform: self._special_paste(clip.id, t),
+                )
+                if label == "JSON pretty-print":
+                    action.setEnabled(
+                        text_transform.is_valid_json(
+                            plain_text.decode("utf-8", errors="replace")
+                        )
+                    )
 
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
 
@@ -804,26 +813,27 @@ class PopupWindow(QWidget):
         self.store.touch(clip.id)
         self.hide()
 
-    def _special_paste(self, row: int, transform) -> None:
+    def _special_paste(self, clip_id: int, transform) -> None:
         """Paste a transformed copy of a clip's plain text without touching storage.
 
         Ditto-style Special Paste: the transform only affects what lands on
         the clipboard/target app, never the stored clip (no update_content
         call), same as the source clip content shown in the list afterwards.
         """
-        clip = self.model.clip_at(row)
         plain = (
-            self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
+            self.store.get_data(clip_id)
+            .get("text/plain", b"")
+            .decode("utf-8", errors="replace")
         )
         transformed = transform(plain)
         self._set_clipboard({"text/plain": transformed.encode("utf-8")}, plain_only=True)
-        self.store.touch(clip.id)
-        self.model.mark_pasted(clip.id)
+        self.store.touch(clip_id)
+        self.model.mark_pasted(clip_id)
         self._preserve_search_once = bool(
             config.get(self._settings, "popup/keep_search_after_paste")
         )
         self.hide()
-        self.paste_requested.emit(clip.id, True)
+        self.paste_requested.emit(clip_id, True)
 
     # -- actions -------------------------------------------------------------
 
