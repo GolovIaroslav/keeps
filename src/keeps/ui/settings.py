@@ -352,13 +352,12 @@ class SettingsDialog(QDialog):
         ocr_box.toggled.connect(self._on_ocr_toggled)
         toggles.addRow(self.tr("OCR text from image clips"), ocr_box)
 
-        image_semantic_box = QCheckBox()
-        image_semantic_box.setChecked(bool(config.get(self._settings, "ai/image_semantic_enabled")))
-        image_semantic_box.toggled.connect(lambda v: self._save("ai/image_semantic_enabled", v))
-        toggles.addRow(
-            self.tr("Semantic search over image content (not implemented yet)"),
-            image_semantic_box,
+        image_semantic_status = QLabel(
+            self.tr("Image semantic search — experimental, not implemented yet")
         )
+        image_semantic_status.setEnabled(False)
+        image_semantic_status.setWordWrap(True)
+        toggles.addRow(image_semantic_status)
         layout.addLayout(toggles)
 
         timing = QFormLayout()
