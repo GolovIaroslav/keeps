@@ -21,6 +21,13 @@ DEFAULTS: dict[str, bool | int | str] = {
     "paste/multi_separator": "\n",
     "paste/multi_reverse_order": False,
     "paste/save_multi_as_clip": False,
+    "paste/app_shortcuts": (
+        '{"alacritty":"ctrl+shift+v","com.mitchellh.ghostty":"ctrl+shift+v",'
+        '"foot":"ctrl+shift+v","ghostty":"ctrl+shift+v","kitty":"ctrl+shift+v",'
+        '"konsole":"ctrl+shift+v","org.kde.konsole":"ctrl+shift+v",'
+        '"org.wezfurlong.wezterm":"ctrl+shift+v","wezterm":"ctrl+shift+v",'
+        '"xterm":"ctrl+shift+v","yakuake":"ctrl+shift+v"}'
+    ),
     "popup/keep_search_after_paste": False,
     "capture/store_html": True,
     "capture/store_images": True,

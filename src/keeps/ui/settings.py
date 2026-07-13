@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -22,12 +23,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from keeps import __version__, autostart, config, diagnostics, multi_paste
+from keeps import __version__, autostart, config, diagnostics, multi_paste, paste
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.store import Store
@@ -239,6 +242,71 @@ class SettingsDialog(QDialog):
         delay.setValue(int(config.get(self._settings, "paste/delay_ms")))
         delay.valueChanged.connect(lambda v: self._save("paste/delay_ms", v))
         form.addRow(self.tr("Paste delay"), delay)
+
+        shortcuts_group = QGroupBox(self.tr("Per-app paste shortcuts"))
+        shortcuts_layout = QVBoxLayout(shortcuts_group)
+        shortcuts_help = QLabel(
+            self.tr(
+                "The active app is detected before the popup opens. "
+                "Detection failure uses Ctrl+V."
+            )
+        )
+        shortcuts_help.setWordWrap(True)
+        shortcuts_layout.addWidget(shortcuts_help)
+        shortcuts = QTableWidget(0, 2)
+        shortcuts.setHorizontalHeaderLabels([self.tr("Application class"), self.tr("Shortcut")])
+        shortcuts.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        shortcuts.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        mapping = paste.parse_app_shortcuts(
+            str(config.get(self._settings, "paste/app_shortcuts"))
+        )
+        shortcuts.blockSignals(True)
+        for app_class, shortcut in mapping.items():
+            row = shortcuts.rowCount()
+            shortcuts.insertRow(row)
+            shortcuts.setItem(row, 0, QTableWidgetItem(app_class))
+            shortcuts.setItem(row, 1, QTableWidgetItem(shortcut))
+        shortcuts.blockSignals(False)
+
+        def save_shortcuts() -> None:
+            values = {}
+            for row in range(shortcuts.rowCount()):
+                app_item = shortcuts.item(row, 0)
+                shortcut_item = shortcuts.item(row, 1)
+                app_class = app_item.text().strip().casefold() if app_item else ""
+                shortcut = shortcut_item.text().strip().casefold() if shortcut_item else ""
+                if app_class and shortcut in {"ctrl+v", "ctrl+shift+v"}:
+                    values[app_class] = shortcut
+            self._save("paste/app_shortcuts", paste.format_app_shortcuts(values))
+
+        shortcuts.itemChanged.connect(lambda _item: save_shortcuts())
+        shortcuts_layout.addWidget(shortcuts)
+        shortcut_buttons = QHBoxLayout()
+        add_shortcut = QPushButton(self.tr("Add"))
+        remove_shortcut = QPushButton(self.tr("Remove selected"))
+
+        def add_shortcut_row() -> None:
+            row = shortcuts.rowCount()
+            shortcuts.insertRow(row)
+            shortcuts.setItem(row, 0, QTableWidgetItem(""))
+            shortcuts.setItem(row, 1, QTableWidgetItem("ctrl+shift+v"))
+            shortcuts.setCurrentCell(row, 0)
+            shortcuts.editItem(shortcuts.item(row, 0))
+
+        def remove_shortcut_rows() -> None:
+            for row in sorted({index.row() for index in shortcuts.selectedIndexes()}, reverse=True):
+                shortcuts.removeRow(row)
+            save_shortcuts()
+
+        add_shortcut.clicked.connect(add_shortcut_row)
+        remove_shortcut.clicked.connect(remove_shortcut_rows)
+        shortcut_buttons.addWidget(add_shortcut)
+        shortcut_buttons.addWidget(remove_shortcut)
+        shortcut_buttons.addStretch(1)
+        shortcuts_layout.addLayout(shortcut_buttons)
+        form.addRow(shortcuts_group)
 
         return widget
 

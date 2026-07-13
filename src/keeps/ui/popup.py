@@ -252,12 +252,15 @@ class _PasteInjectionTask(QRunnable):
     paste.inject_paste() also carries its own timeout as defense in depth.
     """
 
-    def __init__(self, backend: str) -> None:
+    def __init__(self, backend: str, shortcut: str) -> None:
         super().__init__()
         self._backend = backend
+        self._shortcut = shortcut
 
     def run(self) -> None:
-        if not paste.inject_paste(self._backend, shutil.which, subprocess.run):
+        if not paste.inject_paste(
+            self._backend, shutil.which, subprocess.run, self._shortcut
+        ):
             paste.notify_paste_unavailable(self._backend, shutil.which)
 
 
@@ -313,6 +316,7 @@ class PopupWindow(QWidget):
         self._settings = config.open_settings()
         self._search_history = self._load_search_history()
         self._preserve_search_once = False
+        self._target_app_class: str | None = None
         self.model = ClipListModel(store, ai_runtime)
 
         self.search_edit = QLineEdit(self)
@@ -412,6 +416,10 @@ class PopupWindow(QWidget):
     # -- lifecycle ---------------------------------------------------------
 
     def show_popup(self) -> None:
+        backend = paste.session_backend()
+        self._target_app_class = paste.active_app_class(
+            backend, shutil.which, subprocess.run
+        )
         if not self._preserve_search_once:
             self.search_edit.clear()
         self._preserve_search_once = False
@@ -919,11 +927,17 @@ class PopupWindow(QWidget):
             return
         delay_ms = int(config.get(self._settings, "paste/delay_ms"))
         backend = paste.session_backend()
-        QTimer.singleShot(delay_ms, lambda: self._run_paste_injection(backend))
+        shortcut = paste.shortcut_for_app(
+            self._target_app_class,
+            str(config.get(self._settings, "paste/app_shortcuts")),
+        )
+        QTimer.singleShot(
+            delay_ms, lambda: self._run_paste_injection(backend, shortcut)
+        )
 
     @staticmethod
-    def _run_paste_injection(backend: str) -> None:
-        QThreadPool.globalInstance().start(_PasteInjectionTask(backend))
+    def _run_paste_injection(backend: str, shortcut: str) -> None:
+        QThreadPool.globalInstance().start(_PasteInjectionTask(backend, shortcut))
 
     def _delete_current(self) -> None:
         rows = self._selected_rows()
