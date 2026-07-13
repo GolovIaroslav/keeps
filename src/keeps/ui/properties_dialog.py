@@ -56,7 +56,12 @@ class PropertiesDialog(QDialog):
 
         mime_view = QPlainTextEdit()
         mime_view.setReadOnly(True)
-        mime_view.setPlainText("\n".join(f"{mime}: {size} bytes" for mime, size in mime_sizes))
+        mime_view.setPlainText(
+            "\n".join(
+                self.tr("{mime}: {size} bytes").format(mime=mime, size=size)
+                for mime, size in mime_sizes
+            )
+        )
         layout.addWidget(mime_view)
 
         buttons = QDialogButtonBox(

@@ -560,6 +560,44 @@ def test_alias_survives_content_edit_and_stays_in_search_index(store):
     assert [clip.id for clip in store.search("my alias")] == [clip_id]
 
 
+def test_alias_and_alias_search_survive_store_restart(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    original = Store(db_path)
+    clip_id = original.add("text", {"text/plain": b"content"})
+    original.set_alias(clip_id, "Restart title")
+    original.close()
+
+    reopened = Store(db_path)
+    assert reopened.all()[0].alias == "Restart title"
+    assert [clip.id for clip in reopened.search("restart title")] == [clip_id]
+    reopened.close()
+
+
+def test_v2_to_v3_alias_migration_backs_up_and_preserves_clips(tmp_path):
+    db_path = tmp_path / "keeps.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(store_module.SCHEMA)
+    store_module._migrate_v2_groups(conn)
+    conn.execute("PRAGMA user_version = 2")
+    conn.execute(
+        "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
+        "VALUES (0, 0, 'text', 'survives v3', 'h', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(db_path)
+    clip = migrated.all()[0]
+    migrated.close()
+
+    assert clip.preview == "survives v3" and clip.alias is None
+    assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert "alias" in {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    conn.close()
+
+
 def test_mime_sizes_report_exact_stored_bytes(store):
     clip_id = store.add("html", {"text/plain": b"abc", "text/html": b"<b>abc</b>"})
     assert store.mime_sizes(clip_id) == [("text/html", 10), ("text/plain", 3)]

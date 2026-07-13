@@ -78,11 +78,14 @@ class ClipItemDelegate(QStyledItemDelegate):
     def _draw_highlighted_preview(painter, option, rect: QRect, text: str, query: str) -> None:
         ranges = highlight_ranges(text, query)
         if not ranges:
+            painter.save()
+            painter.setFont(option.font)
             painter.drawText(
                 rect,
                 int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft),
                 text,
             )
+            painter.restore()
             return
 
         highlight_format = QTextCharFormat()
