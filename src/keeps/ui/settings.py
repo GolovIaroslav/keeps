@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -35,6 +37,12 @@ from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
+from keeps.popup_keymap import (
+    DEFAULT_POPUP_KEYBINDINGS,
+    POPUP_KEY_BINDINGS,
+    active_sequences,
+    setting_key,
+)
 from keeps.store import Store
 
 ABOUT_HTML = """\
@@ -139,6 +147,7 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget(self)
         tabs.addTab(self._build_general_tab(), self.tr("General"))
+        tabs.addTab(self._build_keys_tab(), self.tr("Keys"))
         tabs.addTab(self._build_clip_hotkeys_tab(), self.tr("Clip hotkeys"))
         tabs.addTab(self._build_capture_tab(), self.tr("Capture"))
         tabs.addTab(self._build_ai_tab(), self.tr("AI"))
@@ -321,6 +330,112 @@ class SettingsDialog(QDialog):
     def _on_theme_changed(self, value: str) -> None:
         self._save("general/theme", value)
         config.apply_theme(value)
+
+    # -- Popup keys (Ф22) ---------------------------------------------
+
+    def _build_keys_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        explanation = QLabel(
+            self.tr(
+                "These shortcuts work while the popup is open. A red field conflicts with "
+                "another popup action or a local clip hotkey."
+            )
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self._popup_key_edits: dict[str, QKeySequenceEdit] = {}
+        self._popup_key_table = QTableWidget(0, 3)
+        self._popup_key_table.setHorizontalHeaderLabels(
+            [self.tr("Action"), self.tr("Shortcut"), self.tr("Default")]
+        )
+        self._popup_key_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        for column in (1, 2):
+            self._popup_key_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        for binding in POPUP_KEY_BINDINGS:
+            row = self._popup_key_table.rowCount()
+            self._popup_key_table.insertRow(row)
+            self._popup_key_table.setItem(row, 0, QTableWidgetItem(self.tr(binding.label)))
+            edit = QKeySequenceEdit(QKeySequence(self._popup_key_value(binding.action)))
+            edit.setMaximumSequenceLength(1)
+            edit.keySequenceChanged.connect(lambda _sequence: self._validate_popup_keybindings())
+            edit.editingFinished.connect(self._save_popup_keybindings)
+            self._popup_key_edits[binding.action] = edit
+            self._popup_key_table.setCellWidget(row, 1, edit)
+            self._popup_key_table.setItem(row, 2, QTableWidgetItem(binding.default))
+        layout.addWidget(self._popup_key_table)
+        reset = QPushButton(self.tr("Reset to defaults"))
+        reset.clicked.connect(self._reset_popup_keybindings)
+        layout.addWidget(reset)
+        self._validate_popup_keybindings()
+        return widget
+
+    def _popup_key_value(self, action: str) -> str:
+        return str(config.get(self._settings, setting_key(action)))
+
+    def _popup_key_values_from_edits(self) -> dict[str, str]:
+        return {
+            action: edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+            for action, edit in self._popup_key_edits.items()
+        }
+
+    def _popup_key_conflicts(self) -> dict[str, str]:
+        values = self._popup_key_values_from_edits()
+        conflicts: dict[str, str] = {}
+        by_sequence: dict[str, list[str]] = {}
+        for action, sequence in values.items():
+            key_sequence = QKeySequence(sequence)
+            if key_sequence.isEmpty():
+                conflicts[action] = self.tr("A shortcut is required.")
+                continue
+            if key_sequence.count() != 1:
+                conflicts[action] = self.tr("Only one key combination is supported.")
+                continue
+            for active_sequence in active_sequences(action, sequence):
+                by_sequence.setdefault(active_sequence, []).append(action)
+        for actions in by_sequence.values():
+            if len(actions) > 1:
+                for action in actions:
+                    conflicts[action] = self.tr("Conflicts with another popup action.")
+        if self._store is not None:
+            local_sequences = {
+                clip.hotkey
+                for clip in self._store.clips_with_hotkeys()
+                if clip.hotkey and not clip.hotkey_global
+            }
+            for action, sequence in values.items():
+                if set(active_sequences(action, sequence)) & local_sequences:
+                    conflicts[action] = self.tr("Conflicts with a local clip hotkey.")
+        return conflicts
+
+    def _validate_popup_keybindings(self) -> bool:
+        conflicts = self._popup_key_conflicts()
+        for action, edit in self._popup_key_edits.items():
+            message = conflicts.get(action, "")
+            edit.setStyleSheet("background: #ffdddd;" if message else "")
+            edit.setToolTip(message)
+        return not conflicts
+
+    def _save_popup_keybindings(self) -> None:
+        if not self._validate_popup_keybindings():
+            QMessageBox.warning(
+                self,
+                self.tr("Shortcut conflict"),
+                self.tr("Resolve the highlighted shortcut conflicts before saving."),
+            )
+            return
+        for action, sequence in self._popup_key_values_from_edits().items():
+            self._save(setting_key(action), sequence)
+
+    def _reset_popup_keybindings(self) -> None:
+        for action, sequence in DEFAULT_POPUP_KEYBINDINGS.items():
+            self._popup_key_edits[action].setKeySequence(QKeySequence(sequence))
+            self._save(setting_key(action), sequence)
+        self._validate_popup_keybindings()
 
     # -- Clip hotkeys -------------------------------------------------
 

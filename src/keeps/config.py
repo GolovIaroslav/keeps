@@ -7,6 +7,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
+from keeps.popup_keymap import DEFAULT_POPUP_KEYBINDINGS, setting_key
+
 DEFAULTS: dict[str, bool | int | str] = {
     "general/max_items": 500,
     "general/max_item_mb": 10,
@@ -50,6 +52,7 @@ DEFAULTS: dict[str, bool | int | str] = {
     # "eslav" alone reproduces today's shipped (pre-Ф9.6) behavior exactly --
     # no bias toward any other language beyond preserving that default.
     "ai/ocr_languages": "eslav",
+    **{setting_key(action): sequence for action, sequence in DEFAULT_POPUP_KEYBINDINGS.items()},
 }
 
 

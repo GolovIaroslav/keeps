@@ -53,6 +53,12 @@ from keeps.clipboard import make_mime_data
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clip_registry import MAX_GLOBAL_CLIP_HOTKEYS
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
+from keeps.popup_keymap import (
+    DEFAULT_KEY_ALIASES,
+    DEFAULT_POPUP_KEYBINDINGS,
+    active_sequences,
+    setting_key,
+)
 from keeps.search import MatchReason, remember_query
 from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
@@ -98,50 +104,13 @@ _EDGE_CURSORS = {
 EDITABLE_KINDS = {"text"}
 EXTERNAL_EDIT_KINDS = {"text", "html", "image"}
 
-_NAV_KEYS = {
-    Qt.Key.Key_Up,
-    Qt.Key.Key_Down,
-    Qt.Key.Key_PageUp,
-    Qt.Key.Key_PageDown,
-    Qt.Key.Key_Home,
-    Qt.Key.Key_End,
-}
-
-# Local clip shortcuts share the popup's window context with the normative
-# §6 keymap. Do not let an assignment silently shadow an existing command.
-_RESERVED_LOCAL_HOTKEYS = {
-    QKeySequence(key).toString(QKeySequence.SequenceFormat.PortableText)
-    for key in (
-        "Esc",
-        "Return",
-        "Enter",
-        "Shift+Return",
-        "Shift+Enter",
-        "Alt+Return",
-        "Alt+Enter",
-        "Ctrl+A",
-        "Ctrl+C",
-        "Ctrl+E",
-        "Ctrl+M",
-        "Ctrl+P",
-        "Ctrl+Tab",
-        "Ctrl+Shift+Tab",
-        "Ctrl+Backtab",
-        "Ctrl+`",
-        "Ctrl++",
-        "Ctrl+=",
-        "Ctrl+-",
-        "Up",
-        "Down",
-        "PgUp",
-        "PgDown",
-        "Home",
-        "End",
-        "F2",
-        "F3",
-        "Del",
-        *(f"Ctrl+{number}" for number in range(1, 10)),
-    )
+_NAVIGATION_KEYS = {
+    "navigate_up": Qt.Key.Key_Up,
+    "navigate_down": Qt.Key.Key_Down,
+    "navigate_page_up": Qt.Key.Key_PageUp,
+    "navigate_page_down": Qt.Key.Key_PageDown,
+    "navigate_home": Qt.Key.Key_Home,
+    "navigate_end": Qt.Key.Key_End,
 }
 
 _LOCAL_HOTKEY_MODIFIERS = (
@@ -151,9 +120,9 @@ _LOCAL_HOTKEY_MODIFIERS = (
 )
 
 
-def _local_hotkey_error(sequence_text: str) -> str | None:
+def _local_hotkey_error(sequence_text: str, reserved: set[str]) -> str | None:
     """Return why a local shortcut would interfere with normal popup input."""
-    if sequence_text in _RESERVED_LOCAL_HOTKEYS:
+    if sequence_text in reserved:
         return "reserved"
     sequence = QKeySequence(sequence_text)
     if sequence[0].keyboardModifiers() & _LOCAL_HOTKEY_MODIFIERS:
@@ -317,16 +286,25 @@ class _PasteInjectionTask(QRunnable):
     paste.inject_paste() also carries its own timeout as defense in depth.
     """
 
-    def __init__(self, backend: str, shortcut: str) -> None:
+    def __init__(
+        self, backend: str, shortcut: str, completion: _PasteCompletion | None = None
+    ) -> None:
         super().__init__()
         self._backend = backend
         self._shortcut = shortcut
+        self._completion = completion
 
     def run(self) -> None:
         if not paste.inject_paste(
             self._backend, shutil.which, subprocess.run, self._shortcut
         ):
             paste.notify_paste_unavailable(self._backend, shutil.which)
+        if self._completion is not None:
+            self._completion.finished.emit()
+
+
+class _PasteCompletion(QObject):
+    finished = Signal()
 
 
 class _TitleBar(QWidget):
@@ -388,9 +366,12 @@ class PopupWindow(QWidget):
         self._search_history = self._load_search_history()
         self._preserve_search_once = False
         self._target_app_class: str | None = None
+        self._persistent = False
+        self._restore_persistent_after_paste = False
         self._clip_hotkeys = clip_hotkeys
         self._buffer_hotkeys = buffer_hotkeys
         self._local_hotkeys: dict[int, QShortcut] = {}
+        self._forwarding_navigation = False
         self.model = ClipListModel(store, ai_runtime)
 
         self.search_edit = QLineEdit(self)
@@ -458,6 +439,13 @@ class PopupWindow(QWidget):
         settings_button.setAutoRaise(True)
         settings_button.clicked.connect(self._open_settings)
         title_bar_layout.addWidget(settings_button)
+        self._persistent_button = QToolButton(self._title_bar)
+        self._persistent_button.setIcon(QIcon.fromTheme("pin"))
+        self._persistent_button.setToolTip(self.tr("Keep popup open"))
+        self._persistent_button.setCheckable(True)
+        self._persistent_button.setAutoRaise(True)
+        self._persistent_button.toggled.connect(self._set_persistent)
+        title_bar_layout.addWidget(self._persistent_button)
 
         layout = QVBoxLayout(self)
         # Matches _RESIZE_MARGIN so the drag-resize hit-test ring is never
@@ -551,7 +539,9 @@ class PopupWindow(QWidget):
         self._target_app_class = paste.active_app_class(
             backend, shutil.which, subprocess.run
         )
-        self._activate_id(clip_id, plain_only=False, want_paste=True)
+        self._activate_id(
+            clip_id, plain_only=False, want_paste=True, allow_persistent=False
+        )
 
     def toggle_popup(self) -> None:
         if self.isVisible():
@@ -609,9 +599,18 @@ class PopupWindow(QWidget):
             # deactivates the popup; hiding it then strands the dialog with
             # no parent window under it (possibly on another screen) and the
             # popup looks "hung" behind the invisible modal grab.
-            if QGuiApplication.modalWindow() is None:
+            if not self._persistent and QGuiApplication.modalWindow() is None:
                 self.hide()
         return super().event(event)
+
+    def _set_persistent(self, enabled: bool) -> None:
+        """Keep this session's popup visible across focus loss and paste."""
+        self._persistent = enabled
+        self._persistent_button.setToolTip(
+            self.tr("Stop keeping popup open")
+            if enabled
+            else self.tr("Keep popup open")
+        )
 
     def refresh(self) -> None:
         self._prune_deleted_global_hotkeys()
@@ -739,11 +738,12 @@ class PopupWindow(QWidget):
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
         if obj is self.list_view and event.type() == QEvent.Type.KeyPress:
-            if event.key() in _NAV_KEYS:
-                # QListView's own navigation already handles these; falling
-                # through to _handle_key would sendEvent() the event straight
-                # back to list_view and recurse through this filter.
-                return False
+            if event.key() in set(_NAVIGATION_KEYS.values()):
+                if self._forwarding_navigation:
+                    return False
+                # Swallow an old default after a rebind; the configured action
+                # below forwards only its selected navigation command.
+                return self._handle_key(event) or True
             return self._handle_key(event)
         if obj is self.tabs and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
@@ -761,72 +761,114 @@ class PopupWindow(QWidget):
             self.unsetCursor()
         return super().eventFilter(obj, event)
 
-    def _handle_key(self, event: QKeyEvent) -> bool:
-        key = event.key()
-        mods = event.modifiers()
-        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
-        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
-        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+    def _keybinding_text(self, action: str) -> str:
+        return str(config.get(self._settings, setting_key(action)))
 
-        if key in _NAV_KEYS:
-            QCoreApplication.sendEvent(self.list_view, event)
+    def _matches_keybinding(self, event: QKeyEvent, action: str) -> bool:
+        sequence_text = self._keybinding_text(action)
+        sequence = QKeySequence(sequence_text)
+        if sequence.count() == 1 and event.keyCombination() == sequence[0]:
             return True
-        if ctrl and key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
-            step = -1 if shift or key == Qt.Key.Key_Backtab else 1
-            self.tabs.setCurrentIndex((self.tabs.currentIndex() + step) % self.tabs.count())
+        if sequence_text != DEFAULT_POPUP_KEYBINDINGS[action]:
+            return False
+        return any(
+            event.keyCombination() == QKeySequence(alias)[0]
+            for alias in DEFAULT_KEY_ALIASES.get(action, ())
+        )
+
+    def _reserved_popup_hotkeys(self) -> set[str]:
+        reserved = {
+            QKeySequence(self._keybinding_text(action)).toString(
+                QKeySequence.SequenceFormat.PortableText
+            )
+            for action in DEFAULT_POPUP_KEYBINDINGS
+        }
+        for action in DEFAULT_KEY_ALIASES:
+            reserved.update(active_sequences(action, self._keybinding_text(action)))
+        return reserved
+
+    def _handle_key(self, event: QKeyEvent) -> bool:
+        for action, navigation_key in _NAVIGATION_KEYS.items():
+            if self._matches_keybinding(event, action):
+                self._forwarding_navigation = True
+                try:
+                    QCoreApplication.sendEvent(
+                        self.list_view,
+                        QKeyEvent(
+                            QEvent.Type.KeyPress,
+                            navigation_key,
+                            Qt.KeyboardModifier.NoModifier,
+                        ),
+                    )
+                finally:
+                    self._forwarding_navigation = False
+                return True
+        if self._matches_keybinding(event, "next_tab"):
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % self.tabs.count())
             return True
-        if ctrl and key == Qt.Key.Key_A:
+        if self._matches_keybinding(event, "previous_tab"):
+            self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % self.tabs.count())
+            return True
+        if self._matches_keybinding(event, "select_all"):
             self.list_view.selectAll()
             return True
-        if key == Qt.Key.Key_Escape:
+        if self._matches_keybinding(event, "hide"):
             self.hide()
             return True
-        if alt and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if self._matches_keybinding(event, "properties"):
             self._properties_current()
             return True
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if self._matches_keybinding(event, "paste"):
             rows = self._selected_rows()
             if len(rows) > 1:
                 self._activate_many(rows, want_paste=True)
             elif rows:
-                self._activate(rows[0], plain_only=shift, want_paste=True)
+                self._activate(rows[0], plain_only=False, want_paste=True)
             return True
-        if ctrl and key == Qt.Key.Key_C:
+        if self._matches_keybinding(event, "paste_plain"):
+            rows = self._selected_rows()
+            if len(rows) > 1:
+                self._activate_many(rows, want_paste=True)
+            elif rows:
+                self._activate(rows[0], plain_only=True, want_paste=True)
+            return True
+        if self._matches_keybinding(event, "copy"):
             rows = self._selected_rows()
             if len(rows) > 1:
                 self._activate_many(rows, want_paste=False)
             elif rows:
                 self._activate(rows[0], plain_only=False, want_paste=False)
             return True
-        if key == Qt.Key.Key_Delete:
+        if self._matches_keybinding(event, "delete"):
             self._delete_current()
             return True
-        if ctrl and key == Qt.Key.Key_E:
+        if self._matches_keybinding(event, "edit_external"):
             self._edit_current()
             return True
-        if key == Qt.Key.Key_F3:
+        if self._matches_keybinding(event, "view"):
             self._view_current()
             return True
-        if key == Qt.Key.Key_F2:
+        if self._matches_keybinding(event, "edit"):
             self._edit_builtin_current()
             return True
-        if ctrl and key == Qt.Key.Key_P:
+        if self._matches_keybinding(event, "pin"):
             self._toggle_pin_current()
             return True
-        if ctrl and key == Qt.Key.Key_M:
+        if self._matches_keybinding(event, "search_mode"):
             self._cycle_search_mode()
             return True
-        if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+        if self._matches_keybinding(event, "scale_up"):
             self._set_ui_scale(geometry.next_ui_scale(self._ui_scale, 1))
             return True
-        if ctrl and key == Qt.Key.Key_Minus:
+        if self._matches_keybinding(event, "scale_down"):
             self._set_ui_scale(geometry.next_ui_scale(self._ui_scale, -1))
             return True
-        if ctrl and Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
-            row = key - Qt.Key.Key_1
-            if row < self.model.rowCount():
-                self._activate(row, plain_only=False, want_paste=True)
-            return True
+        for number in range(1, 10):
+            if self._matches_keybinding(event, f"paste_{number}"):
+                row = number - 1
+                if row < self.model.rowCount():
+                    self._activate(row, plain_only=False, want_paste=True)
+                return True
         return False
 
     def _on_double_clicked(self, index: QModelIndex) -> None:
@@ -998,7 +1040,8 @@ class PopupWindow(QWidget):
         clip = self.model.clip_at(row)
         self._set_clipboard({"text/plain": clip.ocr_text.encode("utf-8")}, plain_only=True)
         self.store.touch(clip.id)
-        self.hide()
+        if not self._persistent:
+            self.hide()
 
     def _special_paste(self, clip_id: int, transform) -> None:
         """Paste a transformed copy of a clip's plain text without touching storage.
@@ -1019,7 +1062,7 @@ class PopupWindow(QWidget):
         self._preserve_search_once = bool(
             config.get(self._settings, "popup/keep_search_after_paste")
         )
-        self.hide()
+        self._hide_before_paste(restore_persistent=self._persistent)
         self.paste_requested.emit(clip_id, True)
 
     # -- actions -------------------------------------------------------------
@@ -1066,34 +1109,46 @@ class PopupWindow(QWidget):
         combined_data = {"text/plain": result.text.encode("utf-8")}
         self._set_clipboard(combined_data, plain_only=True)
         self.store.touch_many(list(result.clip_ids))
-        if want_paste and config.get(self._settings, "paste/save_multi_as_clip"):
+        paste_now = want_paste
+        if paste_now and config.get(self._settings, "paste/save_multi_as_clip"):
             combined_id = self.store.add("text", combined_data)
             if self._ai_runtime is not None:
                 self._ai_runtime.on_clip_captured(combined_id, "text")
             self._prune_deleted_global_hotkeys()
-        if want_paste:
+        if paste_now:
             for clip_id in result.clip_ids:
                 self.model.mark_pasted(clip_id)
             self._preserve_search_once = bool(
                 config.get(self._settings, "popup/keep_search_after_paste")
             )
-        self.hide()
-        if want_paste:
+        if paste_now:
+            self._hide_before_paste(restore_persistent=self._persistent)
+        elif not self._persistent:
+            self.hide()
+        if paste_now:
             self.paste_requested.emit(result.clip_ids[0], True)
 
     def _activate(self, row: int, plain_only: bool, want_paste: bool) -> None:
         self._activate_id(self.model.clip_at(row).id, plain_only, want_paste)
 
-    def _activate_id(self, clip_id: int, plain_only: bool, want_paste: bool) -> None:
+    def _activate_id(
+        self, clip_id: int, plain_only: bool, want_paste: bool, *, allow_persistent: bool = True
+    ) -> None:
         mime_data = self.store.get_data(clip_id)
         self._set_clipboard(mime_data, plain_only)
         self.store.touch(clip_id)
-        if want_paste:
+        paste_now = want_paste
+        if paste_now:
             self._preserve_search_once = bool(
                 config.get(self._settings, "popup/keep_search_after_paste")
             )
-        self.hide()
-        if want_paste:
+        if paste_now:
+            self._hide_before_paste(
+                restore_persistent=self._persistent and allow_persistent
+            )
+        elif not self._persistent:
+            self.hide()
+        if paste_now:
             self.model.mark_pasted(clip_id)
             self.paste_requested.emit(clip_id, plain_only)
 
@@ -1101,11 +1156,20 @@ class PopupWindow(QWidget):
     def _set_clipboard(mime_data: dict[str, bytes], plain_only: bool) -> None:
         QGuiApplication.clipboard().setMimeData(make_mime_data(mime_data, plain_only=plain_only))
 
+    def _hide_before_paste(self, *, restore_persistent: bool) -> None:
+        """Return focus for injection, then restore a pinned popup after it completes."""
+        self._restore_persistent_after_paste = restore_persistent
+        self.hide()
+
     def _schedule_paste_injection(self, clip_id: int, plain_only: bool) -> None:
         # Plain-vs-rich is already decided by what's on the clipboard
         # (_set_clipboard above); injection just replays Ctrl+V.
         del clip_id, plain_only
+        restore_popup = self._restore_persistent_after_paste
+        self._restore_persistent_after_paste = False
         if not config.get(self._settings, "paste/enabled"):
+            if restore_popup:
+                self.show_popup()
             return
         delay_ms = int(config.get(self._settings, "paste/delay_ms"))
         backend = paste.session_backend()
@@ -1114,12 +1178,15 @@ class PopupWindow(QWidget):
             str(config.get(self._settings, "paste/app_shortcuts")),
         )
         QTimer.singleShot(
-            delay_ms, lambda: self._run_paste_injection(backend, shortcut)
+            delay_ms,
+            lambda: self._run_paste_injection(backend, shortcut, restore_popup),
         )
 
-    @staticmethod
-    def _run_paste_injection(backend: str, shortcut: str) -> None:
-        QThreadPool.globalInstance().start(_PasteInjectionTask(backend, shortcut))
+    def _run_paste_injection(self, backend: str, shortcut: str, restore_popup: bool) -> None:
+        completion = _PasteCompletion(self) if restore_popup else None
+        if completion is not None:
+            completion.finished.connect(self.show_popup)
+        QThreadPool.globalInstance().start(_PasteInjectionTask(backend, shortcut, completion))
 
     def _delete_current(self) -> None:
         rows = self._selected_rows()
@@ -1289,7 +1356,11 @@ class PopupWindow(QWidget):
             return
         hotkey = dialog.hotkey()
         hotkey_is_global = dialog.hotkey_is_global()
-        local_error = _local_hotkey_error(hotkey) if hotkey and not hotkey_is_global else None
+        local_error = (
+            _local_hotkey_error(hotkey, self._reserved_popup_hotkeys())
+            if hotkey and not hotkey_is_global
+            else None
+        )
         if local_error == "reserved":
             QMessageBox.warning(
                 self,
