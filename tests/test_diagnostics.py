@@ -2,6 +2,7 @@ import subprocess
 
 from keeps.ai import models
 from keeps.diagnostics import (
+    check_active_window_detector,
     check_kglobalaccel,
     check_klipper,
     check_ocr_model,
@@ -37,6 +38,13 @@ def test_check_paste_injector_x11_uses_xdotool():
     check = check_paste_injector({"XDG_SESSION_TYPE": "x11"}, _which({"xdotool"}))
     assert check.name == "xdotool"
     assert check.ok is True
+
+
+def test_active_window_detector_is_optional_kdotool_on_wayland():
+    missing = check_active_window_detector({"XDG_SESSION_TYPE": "wayland"}, _which(set()))
+    assert missing.name.endswith("(kdotool)")
+    assert missing.ok is False
+    assert "optional" in missing.detail
 
 
 def test_check_uinput_access_true():
@@ -111,7 +119,7 @@ def test_check_ocr_model_downloaded(tmp_path, monkeypatch):
     assert check_ocr_model().ok is True
 
 
-def test_run_all_returns_seven_checks():
+def test_run_all_returns_eight_checks():
     def runner(*args, **kwargs):
         return subprocess.CompletedProcess(args, returncode=1)
 
@@ -121,4 +129,4 @@ def test_run_all_returns_seven_checks():
         path_exists=lambda path: True,
         env={"XDG_SESSION_TYPE": "wayland"},
     )
-    assert len(checks) == 7
+    assert len(checks) == 8

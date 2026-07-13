@@ -36,6 +36,15 @@ def check_paste_injector(env: dict[str, str], which: Callable[[str], str | None]
     return Check(tool, found, "found" if found else f"install {tool} for auto-paste")
 
 
+def check_active_window_detector(
+    env: dict[str, str], which: Callable[[str], str | None]
+) -> Check:
+    tool = "kdotool" if env.get("XDG_SESSION_TYPE") == "wayland" else "xdotool"
+    found = which(tool) is not None
+    detail = "found" if found else f"optional: install {tool} for per-app paste shortcuts"
+    return Check(f"active-window detector ({tool})", found, detail)
+
+
 def check_uinput_access(
     path_exists: Callable[[Path], bool], path: Path = Path("/dev/uinput")
 ) -> Check:
@@ -100,6 +109,7 @@ def run_all(
     return [
         check_wl_paste(which),
         check_paste_injector(env, which),
+        check_active_window_detector(env, which),
         check_uinput_access(path_exists),
         check_session_type(env),
         check_kglobalaccel(runner),
