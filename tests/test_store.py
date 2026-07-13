@@ -436,8 +436,8 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     def add_dummy_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN dummy TEXT")
 
-    monkeypatch.setattr(store_module, "LATEST_VERSION", 3)
-    monkeypatch.setattr(store_module, "MIGRATIONS", {3: add_dummy_column})
+    monkeypatch.setattr(store_module, "LATEST_VERSION", 4)
+    monkeypatch.setattr(store_module, "MIGRATIONS", {4: add_dummy_column})
 
     s2 = Store(db_path, max_items=500)
     clips = s2.all()
@@ -449,7 +449,7 @@ def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
     conn.close()
 
     assert [c.preview for c in clips] == ["before migration"]
-    assert version == 3
+    assert version == 4
     assert "dummy" in columns
     backups = list(tmp_path.glob("keeps.db.backup-*"))
     assert len(backups) == 1
@@ -476,8 +476,8 @@ def test_v1_migration_adds_groups_and_manual_order_with_backup(tmp_path):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     conn.close()
-    assert version == 2
-    assert {"group_id", "manual_order"} <= columns
+    assert version == 3
+    assert {"group_id", "manual_order", "alias"} <= columns
     assert "groups" in tables
     assert clip.preview == "survives" and clip.group_id is None
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
@@ -533,6 +533,36 @@ def test_manual_order_is_scoped_and_history_order_never_changes(store):
 
     assert [clip.id for clip in store.all()] == history_before
     assert [clip.id for clip in store.clips_in_scope("pinned")] == [newest, oldest, middle]
+
+
+def test_alias_is_trimmed_persisted_searchable_and_clearable(store):
+    clip_id = store.add("text", {"text/plain": b"ordinary content"})
+
+    store.set_alias(clip_id, "  Important title  ")
+
+    clip = store.all()[0]
+    assert clip.alias == "Important title"
+    assert [result.id for result in store.search("important title")] == [clip_id]
+    assert store.search_snippet(clip_id, "important", MatchReason.EXACT) == "Important title"
+
+    store.set_alias(clip_id, "   ")
+    assert store.all()[0].alias is None
+    assert store.search("important") == []
+
+
+def test_alias_survives_content_edit_and_stays_in_search_index(store):
+    clip_id = store.add("text", {"text/plain": b"before"})
+    store.set_alias(clip_id, "My alias")
+
+    store.update_content(clip_id, {"text/plain": b"after"})
+
+    assert store.all()[0].alias == "My alias"
+    assert [clip.id for clip in store.search("my alias")] == [clip_id]
+
+
+def test_mime_sizes_report_exact_stored_bytes(store):
+    clip_id = store.add("html", {"text/plain": b"abc", "text/html": b"<b>abc</b>"})
+    assert store.mime_sizes(clip_id) == [("text/html", 10), ("text/plain", 3)]
 
 
 def test_backup_now_creates_a_restorable_copy(tmp_path):

@@ -38,6 +38,8 @@ class _Document:
     normalized_content: str
     ocr: str
     normalized_ocr: str
+    alias: str
+    normalized_alias: str
 
 
 def _decode_limited(data: bytes) -> str:
@@ -73,14 +75,18 @@ class SearchIndex:
         kind: str,
         mime_data: dict[str, bytes],
         ocr_text: str | None = None,
+        alias: str | None = None,
     ) -> None:
         content = _content_for(kind, mime_data)
         ocr = ocr_text or ""
+        alias = alias or ""
         self._documents[clip_id] = _Document(
             content=content,
             normalized_content=normalize(content),
             ocr=ocr,
             normalized_ocr=normalize(ocr),
+            alias=alias,
+            normalized_alias=normalize(alias),
         )
 
     def remove(self, clip_id: int) -> None:
@@ -94,6 +100,20 @@ class SearchIndex:
                 normalized_content=document.normalized_content,
                 ocr=ocr_text,
                 normalized_ocr=normalize(ocr_text),
+                alias=document.alias,
+                normalized_alias=document.normalized_alias,
+            )
+
+    def update_alias(self, clip_id: int, alias: str) -> None:
+        document = self._documents.get(clip_id)
+        if document is not None:
+            self._documents[clip_id] = _Document(
+                content=document.content,
+                normalized_content=document.normalized_content,
+                ocr=document.ocr,
+                normalized_ocr=document.normalized_ocr,
+                alias=alias,
+                normalized_alias=normalize(alias),
             )
 
     def search(self, query: str) -> dict[int, MatchReason]:
@@ -103,7 +123,10 @@ class SearchIndex:
 
         matches = {}
         for clip_id, document in self._documents.items():
-            content_hits = [term in document.normalized_content for term in terms]
+            content_hits = [
+                term in document.normalized_content or term in document.normalized_alias
+                for term in terms
+            ]
             if all(content_hits):
                 matches[clip_id] = MatchReason.EXACT
                 continue
@@ -118,7 +141,12 @@ class SearchIndex:
         document = self._documents.get(clip_id)
         if document is None or reason == MatchReason.SEMANTIC:
             return None
-        source = document.content if reason == MatchReason.EXACT else document.ocr
+        if reason == MatchReason.EXACT and all(
+            normalize(term) in document.normalized_alias for term in query.split()
+        ):
+            source = document.alias
+        else:
+            source = document.content if reason == MatchReason.EXACT else document.ocr
         normalized_source, original_indexes = normalize_with_mapping(source)
         positions = [
             original_indexes[normalized_source.find(normalize(term))]

@@ -50,7 +50,7 @@ PREVIEW_MAX_CHARS = 300
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
 # entries for v2 and beyond.
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 
 def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
@@ -69,7 +69,16 @@ def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {2: _migrate_v2_groups}
+def _migrate_v3_alias(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    if "alias" not in columns:
+        conn.execute("ALTER TABLE clips ADD COLUMN alias TEXT")
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_v2_groups,
+    3: _migrate_v3_alias,
+}
 
 BACKUP_KEEP = 3
 
@@ -109,6 +118,7 @@ class Clip:
     ocr_text: str | None
     group_id: int | None = None
     manual_order: float | None = None
+    alias: str | None = None
 
 
 @dataclass(frozen=True)
@@ -232,7 +242,7 @@ class Store:
         from keeps.search import CONTENT_LIMIT_BYTES
 
         rows = self._conn.execute(
-            "SELECT c.id, c.kind, c.ocr_text, d.mime, "
+            "SELECT c.id, c.kind, c.ocr_text, c.alias, d.mime, "
             "coalesce(substr(d.data, 1, ?), X'') AS data "
             "FROM clips c LEFT JOIN clip_data d ON d.clip_id = c.id AND ("
             "  (c.kind IN ('text', 'html') AND d.mime IN ('text/plain', 'text/html')) OR "
@@ -243,21 +253,23 @@ class Store:
         current_id = None
         current_kind = ""
         current_ocr = None
+        current_alias = None
         current_mime_data: dict[str, bytes] = {}
         for row in rows:
             if current_id is not None and row["id"] != current_id:
                 self._search_index.upsert(
-                    current_id, current_kind, current_mime_data, current_ocr
+                    current_id, current_kind, current_mime_data, current_ocr, current_alias
                 )
                 current_mime_data = {}
             current_id = row["id"]
             current_kind = row["kind"]
             current_ocr = row["ocr_text"]
+            current_alias = row["alias"]
             if row["mime"] is not None:
                 current_mime_data[row["mime"]] = row["data"]
         if current_id is not None:
             self._search_index.upsert(
-                current_id, current_kind, current_mime_data, current_ocr
+                current_id, current_kind, current_mime_data, current_ocr, current_alias
             )
 
     def backup_now(self) -> Path:
@@ -378,7 +390,7 @@ class Store:
         touched) per the dedup invariant. Returns the resulting clip id.
         """
         row = self._conn.execute(
-            "SELECT kind, ocr_text FROM clips WHERE id = ?", (clip_id,)
+            "SELECT kind, ocr_text, alias FROM clips WHERE id = ?", (clip_id,)
         ).fetchone()
         if row is None:
             raise ValueError(f"no such clip: {clip_id}")
@@ -394,10 +406,10 @@ class Store:
             return existing["id"]
 
         preview = build_preview(kind, mime_data)
-        now = int(time.time() * 1000)
+        last_used_at = self._next_usage_timestamps(1)[0]
         self._conn.execute(
             "UPDATE clips SET preview = ?, hash = ?, last_used_at = ? WHERE id = ?",
-            (preview, new_hash, now, clip_id),
+            (preview, new_hash, last_used_at, clip_id),
         )
         self._conn.execute("DELETE FROM clip_data WHERE clip_id = ?", (clip_id,))
         self._conn.executemany(
@@ -407,7 +419,9 @@ class Store:
         if kind == "image":
             self._conn.execute("DELETE FROM thumbs WHERE clip_id = ?", (clip_id,))
         self._conn.commit()
-        self._search_index.upsert(clip_id, kind, mime_data, row["ocr_text"])
+        self._search_index.upsert(
+            clip_id, kind, mime_data, row["ocr_text"], row["alias"]
+        )
         return clip_id
 
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
@@ -533,6 +547,19 @@ class Store:
         ).fetchall()
         return {row["mime"]: row["data"] for row in rows}
 
+    def mime_sizes(self, clip_id: int) -> list[tuple[str, int]]:
+        rows = self._conn.execute(
+            "SELECT mime, length(data) AS size FROM clip_data WHERE clip_id = ? ORDER BY mime",
+            (clip_id,),
+        ).fetchall()
+        return [(row["mime"], row["size"]) for row in rows]
+
+    def set_alias(self, clip_id: int, alias: str | None) -> None:
+        alias = alias.strip() if alias else None
+        self._conn.execute("UPDATE clips SET alias = ? WHERE id = ?", (alias or None, clip_id))
+        self._conn.commit()
+        self._search_index.update_alias(clip_id, alias or "")
+
     def get_thumbnail_source(self, clip_id: int) -> tuple[str, bytes] | None:
         """Return the current image content hash and full PNG for thumbnail work."""
         row = self._conn.execute(
@@ -637,4 +664,5 @@ class Store:
             ocr_text=row["ocr_text"],
             group_id=row["group_id"],
             manual_order=row["manual_order"],
+            alias=row["alias"],
         )
