@@ -5,6 +5,7 @@ import pytest
 from keeps.paste import (
     active_app_class,
     inject_paste,
+    injection_environment,
     notify_paste_unavailable,
     paste_command,
     session_backend,
@@ -74,12 +75,50 @@ def test_active_app_class_falls_back_on_missing_tool_timeout_or_empty_output():
     ) is None
 
 
+@pytest.mark.parametrize("stdout", ["one\ntwo\n", "class with spaces", "!", "x" * 256])
+def test_active_app_class_rejects_malformed_output(stdout):
+    def result(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    assert active_app_class("wayland", lambda tool: f"/usr/bin/{tool}", result) is None
+
+
+def test_active_app_class_falls_back_on_decode_failure():
+    def broken_decode(command, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+    assert active_app_class("wayland", lambda tool: f"/usr/bin/{tool}", broken_decode) is None
+
+
 def test_shortcut_for_app_uses_casefolded_editable_json_mapping():
     mapping = '{"org.kde.konsole":"ctrl+shift+v","firefox":"ctrl+v"}'
     assert shortcut_for_app("ORG.KDE.KONSOLE", mapping) == "ctrl+shift+v"
     assert shortcut_for_app("firefox", mapping) == "ctrl+v"
     assert shortcut_for_app("unknown", mapping) == "ctrl+v"
     assert shortcut_for_app("konsole", "not json") == "ctrl+v"
+
+
+def test_injection_environment_repairs_stale_ydotool_socket():
+    runtime_socket = "/run/user/1000/.ydotool_socket"
+    result = injection_environment(
+        "wayland",
+        {
+            "YDOTOOL_SOCKET": "/tmp/.ydotool_socket",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+        },
+        path_exists=lambda path: str(path) == runtime_socket,
+    )
+    assert result["YDOTOOL_SOCKET"] == runtime_socket
+
+
+def test_injection_environment_preserves_valid_explicit_socket():
+    result = injection_environment(
+        "wayland",
+        {"YDOTOOL_SOCKET": "/custom/socket", "XDG_RUNTIME_DIR": "/run/user/1000"},
+        path_exists=lambda path: str(path)
+        in {"/custom/socket", "/run/user/1000/.ydotool_socket"},
+    )
+    assert result["YDOTOOL_SOCKET"] == "/custom/socket"
 
 
 def test_paste_command_missing_tool_returns_none():

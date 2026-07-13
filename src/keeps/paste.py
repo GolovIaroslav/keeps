@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +66,15 @@ def active_app_class(
             text=True,
             timeout=ACTIVE_APP_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, UnicodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
-    app_class = str(getattr(result, "stdout", "")).strip().casefold()
-    return app_class or None
+    stdout = str(getattr(result, "stdout", ""))
+    app_class = stdout.strip().casefold()
+    if "\n" in app_class or "\r" in app_class:
+        return None
+    if not re.fullmatch(r"[\w.@:+-]{1,255}", app_class):
+        return None
+    return app_class
 
 
 def parse_app_shortcuts(raw_mapping: str) -> dict[str, str]:
@@ -94,6 +101,23 @@ def shortcut_for_app(app_class: str | None, raw_mapping: str) -> str:
     return parse_app_shortcuts(raw_mapping).get(app_class.casefold(), "ctrl+v")
 
 
+def injection_environment(
+    backend: str,
+    env: dict[str, str] | None = None,
+    path_exists: Callable[[Path], bool] = Path.exists,
+) -> dict[str, str]:
+    result = dict(os.environ if env is None else env)
+    if backend != "wayland":
+        return result
+    configured = Path(result.get("YDOTOOL_SOCKET", "/tmp/.ydotool_socket"))
+    runtime_dir = result.get("XDG_RUNTIME_DIR")
+    if runtime_dir and not path_exists(configured):
+        runtime_socket = Path(runtime_dir) / ".ydotool_socket"
+        if path_exists(runtime_socket):
+            result["YDOTOOL_SOCKET"] = str(runtime_socket)
+    return result
+
+
 def inject_paste(
     backend: str,
     which: Callable[[str], str | None],
@@ -106,7 +130,13 @@ def inject_paste(
         logger.warning("paste: no injection tool found for backend=%s", backend)
         return False
     try:
-        runner(command, check=True, capture_output=True, timeout=PASTE_INJECT_TIMEOUT_SECONDS)
+        runner(
+            command,
+            check=True,
+            capture_output=True,
+            timeout=PASTE_INJECT_TIMEOUT_SECONDS,
+            env=injection_environment(backend),
+        )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         logger.warning("paste: injection failed: %s", exc)
         return False

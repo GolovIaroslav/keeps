@@ -39,7 +39,15 @@ def check_paste_injector(env: dict[str, str], which: Callable[[str], str | None]
 def check_active_window_detector(
     env: dict[str, str], which: Callable[[str], str | None]
 ) -> Check:
-    tool = "kdotool" if env.get("XDG_SESSION_TYPE") == "wayland" else "xdotool"
+    wayland = env.get("XDG_SESSION_TYPE") == "wayland"
+    desktop = env.get("XDG_CURRENT_DESKTOP", "").casefold()
+    if wayland and "kde" not in desktop and not env.get("KDE_FULL_SESSION"):
+        return Check(
+            "active-window detector",
+            False,
+            "unsupported Wayland compositor; per-app shortcuts fall back to Ctrl+V",
+        )
+    tool = "kdotool" if wayland else "xdotool"
     found = which(tool) is not None
     detail = "found" if found else f"optional: install {tool} for per-app paste shortcuts"
     return Check(f"active-window detector ({tool})", found, detail)

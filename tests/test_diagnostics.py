@@ -41,10 +41,21 @@ def test_check_paste_injector_x11_uses_xdotool():
 
 
 def test_active_window_detector_is_optional_kdotool_on_wayland():
-    missing = check_active_window_detector({"XDG_SESSION_TYPE": "wayland"}, _which(set()))
+    missing = check_active_window_detector(
+        {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "KDE"}, _which(set())
+    )
     assert missing.name.endswith("(kdotool)")
     assert missing.ok is False
     assert "optional" in missing.detail
+
+
+def test_active_window_detector_rejects_non_kde_wayland_even_with_kdotool():
+    check = check_active_window_detector(
+        {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "GNOME"},
+        _which({"kdotool"}),
+    )
+    assert check.ok is False
+    assert "unsupported" in check.detail
 
 
 def test_check_uinput_access_true():
