@@ -63,15 +63,16 @@ def installed_applications(
     for directory in _data_directories(data_home, data_dirs):
         applications_dir = directory / "applications"
         try:
-            paths = sorted(applications_dir.glob("*.desktop"))
+            paths = sorted(applications_dir.rglob("*.desktop"))
         except OSError:
             continue
         for path in paths:
-            if path.name in applications:
+            desktop_id = path.relative_to(applications_dir).as_posix()
+            if desktop_id in applications:
                 continue
-            app = _desktop_entry(path, path.name)
+            app = _desktop_entry(path, desktop_id)
             if app is not None:
-                applications[path.name] = app
+                applications[desktop_id] = app
     return sorted(applications.values(), key=lambda app: (app.name.casefold(), app.desktop_id))
 
 
