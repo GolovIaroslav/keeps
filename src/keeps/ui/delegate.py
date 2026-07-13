@@ -6,6 +6,7 @@ import time
 
 from PySide6.QtCore import QModelIndex, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import (
+    QColor,
     QFont,
     QFontMetrics,
     QPen,
@@ -18,6 +19,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from keeps.store import Store
+from keeps.ui.color_swatch import parse_color
 from keeps.ui.format import highlight_ranges, relative_time
 
 KIND_LABELS = {"text": "TXT", "html": "HTML", "image": "IMG", "files": "FILES"}
@@ -200,6 +202,16 @@ class ClipItemDelegate(QStyledItemDelegate):
                 painter.setFont(original_font)
                 painter.setPen(text_color)
             rect.setLeft(rect.left() + thumbnail_size + padding)
+
+        color = parse_color(clip.preview) if clip.kind == "text" else None
+        if color is not None:
+            swatch_size = min(18, line_height)
+            swatch_rect = QRect(rect.left(), rect.top() + line_height, swatch_size, swatch_size)
+            painter.fillRect(swatch_rect, QColor(*color))
+            painter.setPen(QPen(option.palette.mid().color()))
+            painter.drawRect(swatch_rect)
+            painter.setPen(text_color)
+            rect.setLeft(rect.left() + swatch_size + padding)
 
         if clip.pinned:
             painter.setBrush(text_color)

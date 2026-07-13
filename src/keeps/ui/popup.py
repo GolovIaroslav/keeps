@@ -49,6 +49,7 @@ from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
 from keeps.ui.expand_dialog import EditDialog, ViewDialog
 from keeps.ui.properties_dialog import PropertiesDialog
+from keeps.ui.qr_dialog import QrDialog
 from keeps.ui.settings import SettingsDialog
 
 SEARCH_DEBOUNCE_MS = 50
@@ -375,6 +376,8 @@ class PopupWindow(QWidget):
         self._title_bar = _TitleBar(self)
         title_bar_layout = QHBoxLayout(self._title_bar)
         title_bar_layout.setContentsMargins(2, 0, 2, 0)
+        self._count_label = QLabel(self._title_bar)
+        title_bar_layout.addWidget(self._count_label)
         title_bar_layout.addStretch(1)
         settings_button = QToolButton(self._title_bar)
         settings_button.setIcon(QIcon.fromTheme("configure"))
@@ -496,7 +499,15 @@ class PopupWindow(QWidget):
 
     def refresh(self) -> None:
         self.model.set_query(self.search_edit.text())
+        self._update_count_label()
         self._prune_thumbnail_cache()
+
+    def _update_count_label(self) -> None:
+        scope = str(self.tabs.tabData(self.tabs.currentIndex()))
+        total = len(self.store.clips_in_scope(scope))
+        self._count_label.setText(self.tr("{shown} shown / {total} total").format(
+            shown=self.model.rowCount(), total=total
+        ))
 
     def _refresh_tabs(self) -> None:
         current_scope = (
@@ -524,6 +535,7 @@ class PopupWindow(QWidget):
         if index < 0:
             return
         self.model.set_scope(str(self.tabs.tabData(index)))
+        self._update_count_label()
         self._select_row(0)
 
     def on_clip_captured(self, _clip_id: int, _kind: str) -> None:
@@ -736,9 +748,13 @@ class PopupWindow(QWidget):
             self.tr("Properties"), lambda: self._properties_id(clip.id)
         )
         properties_action.setEnabled(not multi)
+        plain_text = self.store.get_data(clip.id).get("text/plain") if not multi else None
+        qr_action = menu.addAction(
+            self.tr("View as QR"), lambda: self._view_qr_id(clip.id)
+        )
+        qr_action.setEnabled(not multi and plain_text is not None)
         menu.addAction(self.tr("Delete"), lambda: self._delete_ids(selected_ids))
 
-        plain_text = self.store.get_data(clip.id).get("text/plain") if not multi else None
         if plain_text is not None:
             menu.addSeparator()
             special_menu = menu.addMenu(self.tr("Special Paste"))
@@ -1124,6 +1140,16 @@ class PopupWindow(QWidget):
             if self.model.clip_at(row).id == clip_id:
                 self._select_row(row)
                 break
+        self.search_edit.setFocus()
+
+    def _view_qr_id(self, clip_id: int) -> None:
+        plain = self.store.get_data(clip_id).get("text/plain")
+        if plain is None:
+            return
+        try:
+            QrDialog(plain.decode("utf-8", errors="replace"), self).exec()
+        except Exception as exc:
+            QMessageBox.warning(self, self.tr("Cannot create QR code"), str(exc))
         self.search_edit.setFocus()
 
     def _edit_builtin_current(self) -> None:
