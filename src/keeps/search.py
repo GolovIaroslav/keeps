@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
 from keeps.store import normalize, normalize_with_mapping
+from keeps.text_encoding import normalize_plain_text
 
 CONTENT_LIMIT_BYTES = 10 * 1024
 SEARCH_HISTORY_LIMIT = 20
@@ -43,7 +44,7 @@ class _Document:
 
 
 def _decode_limited(data: bytes) -> str:
-    return data[:CONTENT_LIMIT_BYTES].decode("utf-8", errors="replace")
+    return normalize_plain_text(data[:CONTENT_LIMIT_BYTES]).decode("utf-8", errors="replace")
 
 
 def _file_names(uri_list: bytes) -> str:

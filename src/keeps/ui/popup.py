@@ -1529,8 +1529,8 @@ class PopupWindow(QWidget):
         self._mode_badge.setVisible(rag_on)
         if rag_on:
             mode = self._ai_runtime.search_mode
-            self._mode_badge.setText(f"[{_MODE_BADGE_LABELS[mode]}]")
-            self._mode_badge.setToolTip(_MODE_BADGE_TOOLTIPS[mode])
+            self._mode_badge.setText(f"[{self.tr(_MODE_BADGE_LABELS[mode])}]")
+            self._mode_badge.setToolTip(self.tr(_MODE_BADGE_TOOLTIPS[mode]))
 
     # -- UI scale (Ctrl+scroll / Ctrl+Plus / Ctrl+Minus, §6) ----------------
 

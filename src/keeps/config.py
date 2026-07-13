@@ -15,6 +15,7 @@ DEFAULTS: dict[str, bool | int | str] = {
     "general/autostart": True,
     "general/hotkey": "Ctrl+`",
     "general/theme": "system",
+    "general/language": "en",
     "general/external_editor_text": "",
     "general/external_editor_html": "",
     "general/external_editor_image": "",

@@ -150,6 +150,7 @@ def _run_daemon(show_immediately: bool) -> int:
     from keeps.copy_buffers import CopyBufferController
     from keeps.hotkey.buffers import CopyBufferHotkeyManager
     from keeps.hotkey.clips import ClipGlobalHotkeyManager
+    from keeps.i18n import install_translator
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
     from keeps.ui.thumbnails import ThumbnailRuntime
@@ -169,6 +170,7 @@ def _run_daemon(show_immediately: bool) -> int:
     print(f"keeps: screens at startup: {screen_names}", file=sys.stderr)
 
     settings = config.open_settings()
+    install_translator(qt_app, str(config.get(settings, "general/language")))
     config.apply_theme(str(config.get(settings, "general/theme")))
     store = Store(
         config.default_db_path(), max_items=int(config.get(settings, "general/max_items"))
@@ -233,6 +235,7 @@ def _run_daemon(show_immediately: bool) -> int:
     def apply_runtime_settings() -> None:
         """Apply settings that are owned by the already-running daemon."""
         settings.sync()
+        install_translator(qt_app, str(config.get(settings, "general/language")))
         store.set_max_items(int(config.get(settings, "general/max_items")))
         watcher.set_max_item_mb(float(config.get(settings, "general/max_item_mb")))
 

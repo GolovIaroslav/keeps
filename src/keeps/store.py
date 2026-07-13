@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from keeps.text_encoding import decode_unicode_escapes, normalize_plain_text
+
 if TYPE_CHECKING:
     from keeps.clip_archive import ArchiveClip
     from keeps.search import MatchReason, SearchIndex
@@ -206,10 +208,10 @@ def _png_dimensions(data: bytes) -> tuple[int, int] | None:
 
 def build_preview(kind: str, mime_data: dict[str, bytes]) -> str:
     if kind == "text":
-        text = mime_data["text/plain"].decode("utf-8", errors="replace")
+        text = normalize_plain_text(mime_data["text/plain"]).decode("utf-8")
         return text[:PREVIEW_MAX_CHARS]
     if kind == "html":
-        text = mime_data.get("text/plain", b"").decode("utf-8", errors="replace")
+        text = normalize_plain_text(mime_data.get("text/plain", b"")).decode("utf-8")
         return text[:PREVIEW_MAX_CHARS]
     if kind == "image":
         dims = _png_dimensions(mime_data["image/png"])
@@ -624,7 +626,12 @@ class Store:
         rows = self._conn.execute(
             "SELECT mime, data FROM clip_data WHERE clip_id = ?", (clip_id,)
         ).fetchall()
-        return {row["mime"]: row["data"] for row in rows}
+        return {
+            row["mime"]: normalize_plain_text(row["data"])
+            if row["mime"] == "text/plain"
+            else row["data"]
+            for row in rows
+        }
 
     @staticmethod
     def _validate_copy_buffer(slot: int, kind: str, mime_data: dict[str, bytes]) -> None:
@@ -814,12 +821,15 @@ class Store:
 
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> Clip:
+        preview = row["preview"]
+        if row["kind"] in ("text", "html"):
+            preview = decode_unicode_escapes(preview)
         return Clip(
             id=row["id"],
             created_at=row["created_at"],
             last_used_at=row["last_used_at"],
             kind=row["kind"],
-            preview=row["preview"],
+            preview=preview,
             hash=row["hash"],
             pinned=bool(row["pinned"]),
             use_count=row["use_count"],

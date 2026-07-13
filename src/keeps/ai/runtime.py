@@ -22,6 +22,7 @@ IDLE_CHECK_INTERVAL_MS = 30_000
 # explicitly allows hardcoding this rather than adding more settings surface.
 SCHEDULED_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facing
+AI_TASK_MAX_THREADS = 1  # bound OCR/RAG working memory; model inference is CPU-heavy
 
 
 class _QuerySignals(QObject):
@@ -123,9 +124,7 @@ def available_ocr_language_codes(
     if not is_downloaded_fn(models.OCR_DET):
         return []
     return [
-        code
-        for code in codes
-        if code in models.OCR_REC and is_downloaded_fn(models.OCR_REC[code])
+        code for code in codes if code in models.OCR_REC and is_downloaded_fn(models.OCR_REC[code])
     ]
 
 
@@ -147,11 +146,17 @@ class AiRuntime(QObject):
         self._last_activity = 0.0
         self.search_mode = SearchMode.BLENDED
 
-        # Serialized (maxThreadCount=1): TextEmbedder.load() is not safe to
-        # race from two threads at once, and a single short query encode is
-        # fast enough that serializing has no visible cost.
-        self._query_pool = QThreadPool(self)
-        self._query_pool.setMaxThreadCount(1)
+        # Serialized (maxThreadCount=1): query encoding and model indexing
+        # share one pool so two ONNX sessions cannot multiply RSS. Queries
+        # use the normal priority and jump ahead of background indexing;
+        # background work stays below the default priority.
+        self._ai_pool = QThreadPool(self)
+        self._ai_pool.setMaxThreadCount(AI_TASK_MAX_THREADS)
+        # Never put model indexing on Qt's process-wide pool. A backlog sweep
+        # can contain hundreds of clips; the global pool would run many OCR
+        # sessions concurrently and multiply ONNX Runtime's temporary arenas
+        # into gigabytes of RSS.
+        self._pending_ai_tasks: set[tuple[str, int]] = set()
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setInterval(IDLE_CHECK_INTERVAL_MS)
@@ -179,6 +184,11 @@ class AiRuntime(QObject):
         return bool(config.get(self._settings, "ai/rag_text_enabled"))
 
     @property
+    def ai_task_max_threads(self) -> int:
+        """Maximum number of background OCR/RAG inferences in flight."""
+        return self._ai_pool.maxThreadCount()
+
+    @property
     def ocr_enabled(self) -> bool:
         return bool(config.get(self._settings, "ai/ocr_enabled"))
 
@@ -197,6 +207,12 @@ class AiRuntime(QObject):
         minutes = float(config.get(self._settings, "ai/model_idle_unload_minutes"))
         if minutes <= 0:
             return  # 0 = never auto-unload
+        # Never drop a session while a query or background indexing task is
+        # still using it. This matters with a large backlog: a single worker
+        # can run for longer than the idle interval even though the model is
+        # actively doing useful work.
+        if self._ai_pool.activeThreadCount() or self._pending_ai_tasks:
+            return
         idle = time.monotonic() - self._last_activity
         if idle < minutes * 60:
             return
@@ -208,9 +224,8 @@ class AiRuntime(QObject):
     # -- text embedder lifecycle (Model management) -------------------------
 
     def _get_text_embedder(self):
-        # Guards construction only: query encoding (_query_pool, maxThreadCount=1)
-        # and OCR indexing (QThreadPool.globalInstance()) are separate pools
-        # that could both race to lazily create the embedder on first use.
+        # Guards construction only: direct model-management calls can still
+        # race with the serialized AI pool while lazily creating the embedder.
         with self._text_embedder_lock:
             if self._text_embedder is None:
                 from keeps.ai.text_embed import TextEmbedder
@@ -249,7 +264,7 @@ class AiRuntime(QObject):
         clip_ids_and_vecs = self._store.get_all_embeddings(models.TEXT_EMBED.name)
         signals = _QuerySignals(self)
         signals.finished.connect(on_done)
-        self._query_pool.start(_EncodeQueryTask(embedder, query, signals, clip_ids_and_vecs))
+        self._ai_pool.start(_EncodeQueryTask(embedder, query, signals, clip_ids_and_vecs))
         self._touch_activity()
 
     def embed_text(self, text: str) -> bytes:
@@ -352,9 +367,11 @@ class AiRuntime(QObject):
         signals = _TextEmbedSignals(self)
         signals.finished.connect(self._on_text_embed_done)
         task = _TextEmbedTask(self.embed_text, clip_id, text, signals)
-        QThreadPool.globalInstance().start(task, OCR_TASK_PRIORITY)
+        self._pending_ai_tasks.add(("text", clip_id))
+        self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
     def _on_text_embed_done(self, clip_id: int, vec_bytes: bytes) -> None:
+        self._pending_ai_tasks.discard(("text", clip_id))
         self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
 
     def run_text_embed_backlog_sweep(self) -> None:
@@ -397,10 +414,12 @@ class AiRuntime(QObject):
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
         task = _OcrTask(engine, clip_id, png_bytes, signals, embed_fn)
-        self._touch_activity()
-        QThreadPool.globalInstance().start(task, OCR_TASK_PRIORITY)
+        self._pending_ai_tasks.add(("ocr", clip_id))
+        self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
     def _on_ocr_done(self, clip_id: int, text: str, vec_bytes: bytes | None) -> None:
+        self._pending_ai_tasks.discard(("ocr", clip_id))
+        self._touch_activity()
         self._store.set_ocr_text(clip_id, text)
         if vec_bytes is not None:
             self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)

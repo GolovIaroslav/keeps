@@ -257,6 +257,17 @@ def test_build_preview_truncates_long_text():
     assert len(preview) == 300
 
 
+def test_legacy_unicode_escapes_are_decoded_on_read_without_rewriting_storage(store):
+    escaped = r"\u041f\u0440\u0438\u0432\u0435\u0442"
+    clip_id = store.add("text", {"text/plain": escaped.encode("ascii")})
+
+    clip = store.all()[0]
+    assert clip.id == clip_id
+    assert clip.preview == "Привет"
+    assert store.get_data(clip_id) == {"text/plain": "Привет".encode()}
+    assert [clip.id for clip in store.search("Привет")] == [clip_id]
+
+
 def test_update_content_replaces_data_and_preview(store):
     clip_id = store.add("text", {"text/plain": b"before"})
     old_hash = store.all()[0].hash
@@ -468,9 +479,7 @@ def test_pre_migration_db_gets_migrated_with_backup_and_without_losing_data(tmp_
     assert len(list(tmp_path.glob("*.backup-*"))) == 1
 
 
-def test_migration_backs_up_first_then_preserves_data_and_bumps_version(
-    tmp_path, monkeypatch
-):
+def test_migration_backs_up_first_then_preserves_data_and_bumps_version(tmp_path, monkeypatch):
     db_path = tmp_path / "keeps.db"
     s = Store(db_path, max_items=500)
     s.add("text", {"text/plain": b"before migration"})

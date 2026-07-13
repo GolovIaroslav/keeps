@@ -43,6 +43,7 @@ from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
+from keeps.i18n import SUPPORTED_LANGUAGES
 from keeps.popup_keymap import (
     DEFAULT_POPUP_KEYBINDINGS,
     POPUP_KEY_BINDINGS,
@@ -295,6 +296,17 @@ class SettingsDialog(QDialog):
         hotkey = QLineEdit(str(config.get(self._settings, "general/hotkey")))
         hotkey.editingFinished.connect(lambda: self._save("general/hotkey", hotkey.text()))
         form.addRow(self.tr("Hotkey"), hotkey)
+
+        language_combo = QComboBox()
+        for code, label in SUPPORTED_LANGUAGES:
+            language_combo.addItem(label, code)
+        current_language = str(config.get(self._settings, "general/language"))
+        language_combo.setCurrentIndex(max(0, language_combo.findData(current_language)))
+        language_combo.currentIndexChanged.connect(
+            lambda _index: self._save("general/language", language_combo.currentData())
+        )
+        form.addRow(self.tr("Language"), language_combo)
+        form.addRow(QLabel(self.tr("Language changes apply after restarting Keeps.")))
 
         for key, label in (
             ("general/external_editor_text", self.tr("External editor — text")),

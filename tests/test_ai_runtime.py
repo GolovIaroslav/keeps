@@ -122,6 +122,12 @@ def _make_runtime(store, settings, *, rag_text=False, ocr=False, ocr_timing="del
     return AiRuntime(store, settings)
 
 
+def test_background_ai_pool_is_bounded_for_model_memory(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True, ocr=True)
+
+    assert runtime.ai_task_max_threads == 1
+
+
 # -- text/html capture -> embedding (independent of OCR) ---------------------
 
 
@@ -455,6 +461,43 @@ def test_idle_unload_checks_both_models_in_one_pass(qapp, store, settings):
     assert fake_ocr.unloaded is True
 
 
+def test_idle_unload_waits_for_active_ai_work(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    fake = FakeEmbedder()
+    runtime._text_embedder = fake
+    runtime._last_activity = time.monotonic() - 120
+
+    class BusyPool:
+        def activeThreadCount(self):
+            return 1
+
+    runtime._ai_pool = BusyPool()
+
+    runtime._check_idle_unload()
+
+    assert fake.unloaded is False
+
+
+def test_idle_unload_waits_for_queued_ai_work(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    fake = FakeEmbedder()
+    runtime._text_embedder = fake
+    runtime._last_activity = time.monotonic() - 120
+
+    class IdlePool:
+        def activeThreadCount(self):
+            return 0
+
+    runtime._ai_pool = IdlePool()
+    runtime._pending_ai_tasks.add(("text", 123))
+
+    runtime._check_idle_unload()
+
+    assert fake.unloaded is False
+
+
 def test_text_embedding_touches_shared_idle_activity(qapp, store, settings):
     runtime = _make_runtime(store, settings)
     runtime._text_embedder = FakeEmbedder()
@@ -475,8 +518,8 @@ def test_ocr_processing_touches_shared_idle_activity(qapp, store, settings):
 
     runtime._process_clip_ocr(clip_id)
 
-    assert runtime._last_activity > old_activity
     assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+    assert runtime._last_activity > old_activity
 
 
 def test_loading_ocr_engine_touches_shared_idle_activity(qapp, store, settings):
