@@ -1,0 +1,31 @@
+# Maintainer: Keeps contributors
+pkgname=keeps-git
+pkgver=0
+pkgrel=1
+pkgdesc='Ditto-inspired clipboard manager for Linux (development version)'
+arch=('any')
+url='https://github.com/GolovIaroslav/keeps'
+license=('GPL-3.0-or-later')
+depends=('python' 'pyside6' 'python-qrcode' 'wl-clipboard')
+makedepends=('git' 'python-build' 'python-installer' 'python-hatchling')
+optdepends=('ydotool: automatic paste injection on Wayland'
+            'xdotool: automatic paste injection on X11'
+            'kdotool: terminal-aware paste shortcuts on KDE Wayland')
+source=('git+https://github.com/GolovIaroslav/keeps.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd keeps
+  git describe --long --tags --always | sed 's/^v//;s/-/.r/;s/-/./g'
+}
+
+build() {
+  cd keeps
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd keeps
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/keeps.desktop "$pkgdir/usr/share/applications/keeps.desktop"
+}

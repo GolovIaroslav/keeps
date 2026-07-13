@@ -70,6 +70,7 @@ from keeps.ui.expand_dialog import EditDialog, ViewDialog
 from keeps.ui.properties_dialog import PropertiesDialog
 from keeps.ui.qr_dialog import QrDialog
 from keeps.ui.settings import SettingsDialog
+from keeps.ui.workbench import WorkbenchDialog
 
 SEARCH_DEBOUNCE_MS = 50
 DEFAULT_SIZE = QSize(420, 480)
@@ -454,6 +455,12 @@ class PopupWindow(QWidget):
         import_button.setAutoRaise(True)
         import_button.clicked.connect(self._import_clips)
         title_bar_layout.addWidget(import_button)
+        workbench_button = QToolButton(self._title_bar)
+        workbench_button.setIcon(QIcon.fromTheme("view-list-details"))
+        workbench_button.setToolTip(self.tr("Clipboard Workbench"))
+        workbench_button.setAutoRaise(True)
+        workbench_button.clicked.connect(self._open_workbench)
+        title_bar_layout.addWidget(workbench_button)
         self._persistent_button = QToolButton(self._title_bar)
         self._persistent_button.setIcon(QIcon.fromTheme("pin"))
         self._persistent_button.setToolTip(self.tr("Keep popup open"))
@@ -975,6 +982,10 @@ class PopupWindow(QWidget):
         menu.addAction(self.tr("Delete"), lambda: self._delete_ids(selected_ids))
 
         menu.addSeparator()
+        menu.addAction(
+            self.tr("Open Clipboard Workbench..."),
+            lambda: self._open_workbench(selected_ids),
+        )
         compare_action = menu.addAction(
             self.tr("Compare"), lambda: self._compare_ids(selected_ids)
         )
@@ -1129,6 +1140,53 @@ class PopupWindow(QWidget):
         except OSError as exc:
             QMessageBox.warning(self, self.tr("Cannot export clips"), str(exc))
         self.search_edit.setFocus()
+
+    def _open_workbench(self, clip_ids: list[int] | None = None) -> None:
+        if clip_ids is None:
+            rows = self._selected_rows()
+            clip_ids = [self.model.clip_at(row).id for row in rows]
+        if not clip_ids:
+            QMessageBox.information(
+                self,
+                self.tr("Clipboard Workbench"),
+                self.tr("Select one or more clips first."),
+            )
+            return
+        dialog = WorkbenchDialog(
+            self.store,
+            clip_ids,
+            str(config.get(self._settings, "paste/multi_separator")),
+            self,
+        )
+        if dialog.exec() != WorkbenchDialog.DialogCode.Accepted:
+            self.search_edit.setFocus()
+            return
+        result = dialog.result()
+        if result is None or dialog.action is None:
+            self.search_edit.setFocus()
+            return
+        if result.skipped_ids:
+            QMessageBox.warning(
+                self,
+                self.tr("Some clips were skipped"),
+                self.tr("{count} clip(s) without plain text were skipped.").format(
+                    count=len(result.skipped_ids)
+                ),
+            )
+        if dialog.action == "save":
+            clip_id = self.store.add(result.kind, result.mime_data)
+            self._after_local_add(clip_id, result.kind)
+            return
+
+        self._set_clipboard(result.mime_data, plain_only=result.plain_only)
+        self.store.touch_many(list(result.included_ids))
+        for clip_id in result.included_ids:
+            self.model.mark_pasted(clip_id)
+        self._preserve_search_once = bool(
+            config.get(self._settings, "popup/keep_search_after_paste")
+        )
+        self._hide_before_paste(restore_persistent=self._persistent)
+        self.paste_requested.emit(result.included_ids[0], result.plain_only)
 
     def _import_clips(self) -> None:
         filename, _selected_filter = QFileDialog.getOpenFileName(

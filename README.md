@@ -2,7 +2,7 @@
 
 A [Ditto](https://github.com/sabrogden/Ditto)-inspired clipboard manager for Linux. Wayland-first, KDE-first, light and fast.
 
-> **Status: v0.2.0.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. AUR packaging is not done yet — install from source or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
+> **Status: v0.2.0.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
 
 ## Why
 
@@ -61,7 +61,15 @@ The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click
 | `Ctrl+M` | cycle search mode: blended → keywords → meaning (only when AI text search is enabled) |
 | `Esc` / focus loss | hide popup |
 
-On KDE, the global hotkey is registered via KGlobalAccel; on plain X11 desktops it falls back to a direct XGrabKey. Neither works on non-KDE Wayland compositors (e.g. GNOME, Sway) — bind `keeps toggle` to a key in your compositor's own shortcut settings instead.
+On KDE, the global hotkey is registered via KGlobalAccel; on plain X11 desktops it falls back to a direct XGrabKey. On other Wayland compositors, Keeps tries the XDG GlobalShortcuts portal and falls back to a compositor-bound `keeps toggle` shortcut if the portal is unavailable or declined.
+
+### Desktop environments
+
+- **KDE Plasma:** Keeps registers its global shortcut through KGlobalAccel. If the key is already assigned, remove the old assignment in System Settings, then assign it to Keeps.
+- **GNOME, Sway, Hyprland, and other Wayland compositors:** the XDG GlobalShortcuts portal is tried first. If your portal backend does not provide this interface or the consent dialog is declined, add a custom keyboard shortcut that runs `keeps toggle`.
+- **X11 desktops:** Keeps tries a native XGrabKey registration. If that is unavailable, use the same `keeps toggle` custom shortcut.
+
+The popup is deliberately placed by the compositor on Wayland; there is no portable API for reading the pointer position of another application. `keeps status` reports missing `wl-clipboard`, `ydotool`, or hotkey services with a suggested fix.
 
 ## Stack
 

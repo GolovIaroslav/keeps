@@ -62,6 +62,12 @@ def _make_hotkey(key_sequence: str):
         x11_hotkey = XGrabKeyHotkey(key_sequence)
         if x11_hotkey.register():
             return x11_hotkey
+    else:
+        from keeps.hotkey.portal import PortalGlobalShortcutHotkey
+
+        portal_hotkey = PortalGlobalShortcutHotkey(key_sequence)
+        if portal_hotkey.register():
+            return portal_hotkey
 
     return None
 
@@ -209,6 +215,14 @@ def _run_daemon(show_immediately: bool) -> int:
     hotkey = _make_hotkey(str(config.get(settings, "general/hotkey")))
     if hotkey is not None:
         hotkey.triggered.connect(popup.toggle_popup)
+        if hasattr(hotkey, "registration_failed"):
+            hotkey.registration_failed.connect(
+                lambda error: print(
+                    f"warning: global shortcut registration failed ({error}); "
+                    "bind `keeps toggle` in the compositor settings",
+                    file=sys.stderr,
+                )
+            )
     else:
         print("warning: global hotkey registration failed; use `keeps toggle`", file=sys.stderr)
 
