@@ -220,9 +220,13 @@ class ClipItemDelegate(QStyledItemDelegate):
             rect.left(), rect.top() + line_height, rect.width(), line_height * MAX_PREVIEW_LINES
         )
         display_text = index.model().display_text(clip)
+        preview_option = option
+        if clip.alias and display_text == clip.alias:
+            preview_option = QStyleOptionViewItem(option)
+            preview_option.font.setItalic(True)
         self._draw_highlighted_preview(
             painter,
-            option,
+            preview_option,
             preview_rect,
             display_text,
             index.model().current_query,

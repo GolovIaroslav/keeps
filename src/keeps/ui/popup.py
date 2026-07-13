@@ -48,6 +48,7 @@ from keeps.store import Clip, Store
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
 from keeps.ui.expand_dialog import EditDialog, ViewDialog
+from keeps.ui.properties_dialog import PropertiesDialog
 from keeps.ui.settings import SettingsDialog
 
 SEARCH_DEBOUNCE_MS = 50
@@ -156,7 +157,7 @@ class ClipListModel(QAbstractListModel):
         return self._match_reasons.get(clip_id)
 
     def display_text(self, clip: Clip) -> str:
-        return self._display_texts.get(clip.id, clip.preview)
+        return self._display_texts.get(clip.id, clip.alias or clip.preview)
 
     def set_query(self, query: str) -> None:
         self._current_query = query
@@ -591,6 +592,7 @@ class PopupWindow(QWidget):
         mods = event.modifiers()
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
 
         if key in _NAV_KEYS:
             QCoreApplication.sendEvent(self.list_view, event)
@@ -604,6 +606,9 @@ class PopupWindow(QWidget):
             return True
         if key == Qt.Key.Key_Escape:
             self.hide()
+            return True
+        if alt and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._properties_current()
             return True
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             rows = self._selected_rows()
@@ -727,6 +732,10 @@ class PopupWindow(QWidget):
         builtin_edit_action.setEnabled(not multi and clip.kind in EDITABLE_KINDS)
         edit_action = menu.addAction(self.tr("Edit externally"), self._edit_current)
         edit_action.setEnabled(not multi and clip.kind in EXTERNAL_EDIT_KINDS)
+        properties_action = menu.addAction(
+            self.tr("Properties"), lambda: self._properties_id(clip.id)
+        )
+        properties_action.setEnabled(not multi)
         menu.addAction(self.tr("Delete"), lambda: self._delete_ids(selected_ids))
 
         plain_text = self.store.get_data(clip.id).get("text/plain") if not multi else None
@@ -1093,6 +1102,28 @@ class PopupWindow(QWidget):
         clip = self.model.clip_at(row)
         mime_data = self.store.get_data(clip.id)
         ViewDialog(clip, mime_data, self).exec()
+        self.search_edit.setFocus()
+
+    def _properties_current(self) -> None:
+        row = self._single_selected_row()
+        if row is not None:
+            self._properties_id(self.model.clip_at(row).id)
+
+    def _properties_id(self, clip_id: int) -> None:
+        clip = next((item for item in self.store.all() if item.id == clip_id), None)
+        if clip is None:
+            return
+        dialog = PropertiesDialog(clip, self.store.mime_sizes(clip_id), self)
+        if dialog.exec() != PropertiesDialog.DialogCode.Accepted:
+            self.search_edit.setFocus()
+            return
+        self.store.set_alias(clip_id, dialog.alias())
+        self.store.set_pinned(clip_id, dialog.pinned())
+        self.refresh()
+        for row in range(self.model.rowCount()):
+            if self.model.clip_at(row).id == clip_id:
+                self._select_row(row)
+                break
         self.search_edit.setFocus()
 
     def _edit_builtin_current(self) -> None:
