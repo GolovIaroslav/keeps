@@ -167,6 +167,48 @@ def test_build_bundle_under_size_cap_passes():
     assert result is not None
 
 
+def test_build_bundle_can_preserve_small_extra_mime_formats():
+    extra_mime = "application/x-editor-state"
+    mime_bytes = {
+        MIME_PLAIN: b"hello",
+        extra_mime: b"opaque editor state",
+        "application/x-too-large": b"x" * (1024 * 1024 + 1),
+    }
+
+    result = build_bundle(
+        set(mime_bytes),
+        lambda mime: mime_bytes[mime],
+        store_all_formats=True,
+    )
+
+    assert result == (
+        "text",
+        {MIME_PLAIN: b"hello", extra_mime: b"opaque editor state"},
+    )
+
+
+def test_extra_mime_formats_respect_the_existing_total_item_cap():
+    first_extra = "application/a-small"
+    second_extra = "application/z-small"
+    mime_bytes = {
+        MIME_PLAIN: b"p" * (600 * 1024),
+        first_extra: b"a" * (400 * 1024),
+        second_extra: b"z" * (400 * 1024),
+    }
+
+    result = build_bundle(
+        set(mime_bytes),
+        lambda mime: mime_bytes[mime],
+        max_item_mb=1,
+        store_all_formats=True,
+    )
+
+    assert result == (
+        "text",
+        {MIME_PLAIN: mime_bytes[MIME_PLAIN], first_extra: mime_bytes[first_extra]},
+    )
+
+
 def test_self_set_guard_skips_once_within_window():
     guard = SelfSetGuard(window_seconds=1.0)
     guard.mark_self_set()

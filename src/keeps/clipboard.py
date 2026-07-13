@@ -23,6 +23,10 @@ def make_mime_data(mime_data: dict[str, bytes], *, plain_only: bool = False) -> 
     uri_list = mime_data.get("text/uri-list")
     if uri_list is not None:
         result.setUrls([QUrl(line) for line in uri_list.decode("utf-8").splitlines() if line])
+    canonical = {"text/plain", "text/html", "image/png", "text/uri-list"}
+    for mime, data in mime_data.items():
+        if mime not in canonical:
+            result.setData(mime, data)
     return result
 
 

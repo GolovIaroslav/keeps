@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 class TrayIcon(QObject):
     show_requested = Signal()
+    new_clip_requested = Signal()
     settings_requested = Signal()
     quit_requested = Signal()
     capture_paused_changed = Signal(bool)
@@ -21,6 +22,9 @@ class TrayIcon(QObject):
         menu = QMenu()
         show_action = menu.addAction(self.tr("Show"))
         show_action.triggered.connect(self.show_requested)
+
+        new_clip_action = menu.addAction(self.tr("New clip"))
+        new_clip_action.triggered.connect(self.new_clip_requested)
 
         self._pause_action = menu.addAction(self.tr("Pause capture"))
         self._pause_action.setCheckable(True)

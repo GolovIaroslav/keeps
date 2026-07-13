@@ -15,6 +15,7 @@ MIME_IMAGE = "image/png"
 MIME_URI_LIST = "text/uri-list"
 
 DEFAULT_MAX_ITEM_MB = 10
+EXTRA_MIME_MAX_BYTES = 1024 * 1024
 
 # Mime types to fetch for each kind, in priority order (see PLAN.md §5 canon).
 _MIMES_FOR_KIND = {
@@ -108,30 +109,52 @@ def build_bundle(
     available: set[str],
     reader: Callable[[str], bytes],
     max_item_mb: float = DEFAULT_MAX_ITEM_MB,
+    *,
+    store_all_formats: bool = False,
 ) -> tuple[str, dict[str, bytes]] | None:
     """Turn offered mime types into a (kind, mime_data) bundle ready for Store.add().
 
     Returns None if no known kind is offered, or the content exceeds max_item_mb.
     """
+    cache: dict[str, bytes] = {}
+
+    def read(mime: str) -> bytes:
+        if mime not in cache:
+            cache[mime] = reader(mime)
+        return cache[mime]
+
     kind = detect_kind(available)
     if kind is None:
         return None
     if kind == "html":
-        html_bytes = reader(MIME_HTML)
+        html_bytes = read(MIME_HTML)
         kind = detect_kind(available, html_bytes)
         if kind == "html":
             bundle = {MIME_HTML: html_bytes}
             if MIME_PLAIN in available:
-                bundle[MIME_PLAIN] = reader(MIME_PLAIN)
+                bundle[MIME_PLAIN] = read(MIME_PLAIN)
         else:
-            bundle = select_bundle(kind, available, reader)
+            bundle = select_bundle(kind, available, read)
     else:
-        bundle = select_bundle(kind, available, reader)
+        bundle = select_bundle(kind, available, read)
     if not bundle:
         return None
     if not within_size_cap(bundle, max_item_mb):
         logger.debug("clip exceeds max_item_mb=%s, skipping", max_item_mb)
         return None
+    if store_all_formats:
+        max_total_bytes = int(max_item_mb * 1024 * 1024)
+        total_bytes = sum(len(value) for value in bundle.values())
+        for mime in sorted(available - bundle.keys()):
+            data = read(mime)
+            if len(data) > EXTRA_MIME_MAX_BYTES:
+                logger.debug("extra MIME %s exceeds the 1 MiB per-format cap", mime)
+                continue
+            if total_bytes + len(data) > max_total_bytes:
+                logger.debug("extra MIME %s would exceed max_item_mb=%s", mime, max_item_mb)
+                continue
+            bundle[mime] = data
+            total_bytes += len(data)
     return kind, bundle
 
 

@@ -13,7 +13,7 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 - **Readable history**: multi-line previews (up to 3 lines), image thumbnails, full preview on hover.
 - **Search as you type**, Cyrillic-aware.
 - **Predictable ordering**: a used item always jumps to the top. Always.
-- **Multi-format**: plain text, rich text (HTML), images, file lists. Paste-as-plain-text with one key.
+- **Multi-format**: plain text, rich text (HTML), images, file lists. Optionally preserve extra source MIME formats too. Paste-as-plain-text with one key.
 - History in SQLite (survives reboots), pinned items, tray icon, autostart, GUI settings.
 - No telemetry, no accounts, no network calls except an explicit, opt-in AI model download (semantic text search + OCR).
 
@@ -42,7 +42,7 @@ uv run keeps
 - `keeps show` — show the popup without toggling it closed.
 - `keeps status` — run diagnostics (wl-paste, ydotool, kglobalaccel, session type, Klipper, AI models).
 
-The tray icon has Show / Pause capture / Settings / Quit. Settings (`general`/`capture`/`ai` tabs) live at `~/.config/keeps/keeps.ini`.
+The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; use the popup title bar to create or import clips. Settings (`general`/`capture`/`ai` tabs) live at `~/.config/keeps/keeps.ini`.
 
 ### Popup keymap
 

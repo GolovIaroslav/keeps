@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from keeps.clip_archive import ArchiveClip
     from keeps.search import MatchReason, SearchIndex
 
 SCHEMA = """
@@ -350,8 +351,6 @@ class Store:
     def add(self, kind: str, mime_data: dict[str, bytes]) -> int:
         """Insert a new clip, or move an existing duplicate to the top."""
         content_hash = hashlib.sha256(_canonical_bytes(kind, mime_data)).hexdigest()
-        now = int(time.time() * 1000)
-
         existing = self._conn.execute(
             "SELECT id FROM clips WHERE hash = ?", (content_hash,)
         ).fetchone()
@@ -359,13 +358,48 @@ class Store:
             clip_id = existing["id"]
             self.touch(clip_id)
             return clip_id
+        return self._insert_new_clip(kind, mime_data, content_hash)
+
+    def import_clip(self, clip: ArchiveClip) -> tuple[int, bool]:
+        """Merge one portable archive clip without touching an existing duplicate.
+
+        Return ``(clip_id, inserted)``. Unlike :meth:`add`, an already-known
+        hash is intentionally left in place: importing a backup must not
+        rewrite the user's history order or use count.
+        """
+        content_hash = hashlib.sha256(_canonical_bytes(clip.kind, clip.mime_data)).hexdigest()
+        existing = self._conn.execute(
+            "SELECT id FROM clips WHERE hash = ?", (content_hash,)
+        ).fetchone()
+        if existing is not None:
+            return existing["id"], False
+        clip_id = self._insert_new_clip(
+            clip.kind,
+            clip.mime_data,
+            content_hash,
+            pinned=clip.pinned,
+            alias=clip.alias,
+        )
+        return clip_id, True
+
+    def _insert_new_clip(
+        self,
+        kind: str,
+        mime_data: dict[str, bytes],
+        content_hash: str,
+        *,
+        pinned: bool = False,
+        alias: str | None = None,
+    ) -> int:
+        now = int(time.time() * 1000)
+        normalized_alias = alias.strip() or None if alias else None
 
         preview = build_preview(kind, mime_data)
         last_used_at = self._next_usage_timestamps(1)[0]
         cur = self._conn.execute(
-            "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, use_count) "
-            "VALUES (?, ?, ?, ?, ?, 1)",
-            (now, last_used_at, kind, preview, content_hash),
+            "INSERT INTO clips (created_at, last_used_at, kind, preview, hash, pinned, alias, "
+            "use_count) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (now, last_used_at, kind, preview, content_hash, int(pinned), normalized_alias),
         )
         clip_id = cur.lastrowid
         self._conn.executemany(
@@ -373,7 +407,7 @@ class Store:
             [(clip_id, mime, data) for mime, data in mime_data.items()],
         )
         self._conn.commit()
-        self._search_index.upsert(clip_id, kind, mime_data)
+        self._search_index.upsert(clip_id, kind, mime_data, alias=normalized_alias)
         self.trim()
         return clip_id
 

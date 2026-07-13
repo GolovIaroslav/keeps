@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from pathlib import Path
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -33,6 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -46,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from keeps import config, multi_paste, paste
+from keeps import clip_archive, compare, config, multi_paste, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.clipboard import make_mime_data
@@ -439,6 +442,18 @@ class PopupWindow(QWidget):
         settings_button.setAutoRaise(True)
         settings_button.clicked.connect(self._open_settings)
         title_bar_layout.addWidget(settings_button)
+        new_clip_button = QToolButton(self._title_bar)
+        new_clip_button.setIcon(QIcon.fromTheme("document-new"))
+        new_clip_button.setToolTip(self.tr("New clip"))
+        new_clip_button.setAutoRaise(True)
+        new_clip_button.clicked.connect(self.new_clip)
+        title_bar_layout.addWidget(new_clip_button)
+        import_button = QToolButton(self._title_bar)
+        import_button.setIcon(QIcon.fromTheme("document-import"))
+        import_button.setToolTip(self.tr("Import clips..."))
+        import_button.setAutoRaise(True)
+        import_button.clicked.connect(self._import_clips)
+        title_bar_layout.addWidget(import_button)
         self._persistent_button = QToolButton(self._title_bar)
         self._persistent_button.setIcon(QIcon.fromTheme("pin"))
         self._persistent_button.setToolTip(self.tr("Keep popup open"))
@@ -959,6 +974,16 @@ class PopupWindow(QWidget):
         qr_action.setEnabled(not multi and plain_text is not None)
         menu.addAction(self.tr("Delete"), lambda: self._delete_ids(selected_ids))
 
+        menu.addSeparator()
+        compare_action = menu.addAction(
+            self.tr("Compare"), lambda: self._compare_ids(selected_ids)
+        )
+        comparison_available = len(selected_ids) == 2 and compare.comparison_payload(
+            self.store.get_data(selected_ids[0]), self.store.get_data(selected_ids[1])
+        ) is not None
+        compare_action.setEnabled(comparison_available)
+        menu.addAction(self.tr("Export selected..."), lambda: self._export_ids(selected_ids))
+
         if plain_text is not None:
             menu.addSeparator()
             special_menu = menu.addMenu(self.tr("Special Paste"))
@@ -1064,6 +1089,137 @@ class PopupWindow(QWidget):
         )
         self._hide_before_paste(restore_persistent=self._persistent)
         self.paste_requested.emit(clip_id, True)
+
+    def new_clip(self) -> None:
+        """Create a text clip from the same editor used by F2."""
+        dialog = EditDialog("", self)
+        if not dialog.exec():
+            self.search_edit.setFocus()
+            return
+        clip_id = self.store.add("text", {"text/plain": dialog.text().encode("utf-8")})
+        self._after_local_add(clip_id, "text")
+
+    def _export_ids(self, clip_ids: list[int]) -> None:
+        if not clip_ids:
+            return
+        filename, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Export clips"),
+            "keeps-clips.keeps.json",
+            self.tr("Keeps clips (*.keeps.json)"),
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.name.endswith(".keeps.json"):
+            path = path.with_name(f"{path.name}.keeps.json")
+        clips_by_id = {clip.id: clip for clip in self.store.all()}
+        records = [
+            clip_archive.ArchiveClip(
+                clips_by_id[clip_id].kind,
+                self.store.get_data(clip_id),
+                pinned=clips_by_id[clip_id].pinned,
+                alias=clips_by_id[clip_id].alias,
+            )
+            for clip_id in clip_ids
+            if clip_id in clips_by_id
+        ]
+        try:
+            path.write_bytes(clip_archive.encode_archive(records))
+        except OSError as exc:
+            QMessageBox.warning(self, self.tr("Cannot export clips"), str(exc))
+        self.search_edit.setFocus()
+
+    def _import_clips(self) -> None:
+        filename, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            self.tr("Import clips"),
+            "",
+            self.tr("Keeps clips (*.keeps.json);;All files (*)"),
+        )
+        if not filename:
+            return
+        try:
+            records = clip_archive.decode_archive(Path(filename).read_bytes())
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, self.tr("Cannot import clips"), str(exc))
+            self.search_edit.setFocus()
+            return
+        inserted = 0
+        duplicates = 0
+        for record in records:
+            clip_id, was_inserted = self.store.import_clip(record)
+            if was_inserted:
+                inserted += 1
+                self._after_local_add(clip_id, record.kind, refresh=False)
+            else:
+                duplicates += 1
+        self.refresh()
+        QMessageBox.information(
+            self,
+            self.tr("Import complete"),
+            self.tr("Imported {inserted} clip(s); skipped {duplicates} duplicate(s).").format(
+                inserted=inserted, duplicates=duplicates
+            ),
+        )
+        self.search_edit.setFocus()
+
+    def _compare_ids(self, clip_ids: list[int]) -> None:
+        if len(clip_ids) != 2:
+            return
+        payload = compare.comparison_payload(
+            self.store.get_data(clip_ids[0]), self.store.get_data(clip_ids[1])
+        )
+        if payload is None:
+            QMessageBox.warning(
+                self,
+                self.tr("Cannot compare clips"),
+                self.tr("The selected clips have no shared text format."),
+            )
+            return
+        command = compare.diff_command(
+            str(config.get(self._settings, "general/external_diff")), shutil.which
+        )
+        if command is None:
+            QMessageBox.warning(
+                self,
+                self.tr("No diff tool available"),
+                self.tr("Install meld, kompare, or kdiff3, or configure an external diff tool."),
+            )
+            return
+        suffix, left, right = payload
+        directory = Path(tempfile.mkdtemp(prefix="keeps-compare-"))
+        left_path, right_path = compare.write_comparison_pair(directory, suffix, left, right)
+        try:
+            process = subprocess.Popen([*command, str(left_path), str(right_path)])
+        except OSError as exc:
+            shutil.rmtree(directory, ignore_errors=True)
+            QMessageBox.warning(self, self.tr("Cannot start diff tool"), str(exc))
+            return
+        threading.Thread(
+            target=self._remove_compare_files_when_done,
+            args=(process, directory),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _remove_compare_files_when_done(process: subprocess.Popen, directory: Path) -> None:
+        process.wait()
+        shutil.rmtree(directory, ignore_errors=True)
+
+    def _after_local_add(self, clip_id: int, kind: str, *, refresh: bool = True) -> None:
+        if self._ai_runtime is not None:
+            self._ai_runtime.on_clip_captured(clip_id, kind)
+        if kind == "image":
+            self.thumbnail_requested.emit(clip_id, kind)
+        self.on_clip_captured(clip_id, kind)
+        if refresh:
+            self.refresh()
+            for row in range(self.model.rowCount()):
+                if self.model.clip_at(row).id == clip_id:
+                    self._select_row(row)
+                    break
+        self.search_edit.setFocus()
 
     # -- actions -------------------------------------------------------------
 

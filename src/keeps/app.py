@@ -226,6 +226,7 @@ def _run_daemon(show_immediately: bool) -> int:
     tray = TrayIcon()
     copy_buffers.status_changed.connect(tray.show_message)
     tray.show_requested.connect(popup.show_popup)
+    tray.new_clip_requested.connect(popup.new_clip)
 
     def on_capture_paused_changed(paused: bool) -> None:
         if paused:

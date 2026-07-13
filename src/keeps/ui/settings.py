@@ -190,9 +190,14 @@ class SettingsDialog(QDialog):
             ("general/external_editor_text", self.tr("External editor — text")),
             ("general/external_editor_html", self.tr("External editor — HTML")),
             ("general/external_editor_image", self.tr("External editor — images")),
+            ("general/external_diff", self.tr("External diff tool")),
         ):
             editor = QLineEdit(str(config.get(self._settings, key)))
-            editor.setPlaceholderText(self.tr("xdg-open (system default)"))
+            editor.setPlaceholderText(
+                self.tr("meld / kompare / kdiff3 (auto-detect)")
+                if key == "general/external_diff"
+                else self.tr("xdg-open (system default)")
+            )
             editor.editingFinished.connect(lambda k=key, e=editor: self._save(k, e.text()))
             form.addRow(label, editor)
 
@@ -575,11 +580,21 @@ class SettingsDialog(QDialog):
             ("capture/store_html", self.tr("Store HTML clips")),
             ("capture/store_images", self.tr("Store image clips")),
             ("capture/store_files", self.tr("Store file-list clips")),
+            ("capture/store_all_formats", self.tr("Preserve extra MIME formats")),
         ):
             box = QCheckBox()
             box.setChecked(bool(config.get(self._settings, key)))
             box.toggled.connect(lambda v, k=key: self._save(k, v))
             form.addRow(label, box)
+
+        explanation = QLabel(
+            self.tr(
+                "Extra formats are kept only when each is at most 1 MiB and the whole clip "
+                "still fits the item size limit."
+            )
+        )
+        explanation.setWordWrap(True)
+        form.addRow(explanation)
 
         return widget
 

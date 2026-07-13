@@ -93,8 +93,14 @@ class WaylandWatcher(QObject):
         available = self._list_types()
         if available is None:
             return None
+        settings = config.open_settings()
         try:
-            result = build_bundle(available, self._read_mime, self._max_item_mb)
+            result = build_bundle(
+                available,
+                self._read_mime,
+                self._max_item_mb,
+                store_all_formats=bool(config.get(settings, "capture/store_all_formats")),
+            )
         except subprocess.TimeoutExpired:
             logger.warning("wl-paste read timed out; clipboard owner unresponsive, skipping clip")
             return None

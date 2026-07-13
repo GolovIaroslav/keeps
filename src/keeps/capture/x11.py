@@ -63,7 +63,13 @@ class X11Watcher(QObject):
             return
         self._mime_data = self._clipboard.mimeData()
         available = self._available_types()
-        result = build_bundle(available, self._read_mime, self._max_item_mb)
+        settings = config.open_settings()
+        result = build_bundle(
+            available,
+            self._read_mime,
+            self._max_item_mb,
+            store_all_formats=bool(config.get(settings, "capture/store_all_formats")),
+        )
         self._mime_data = None
         if result is None:
             return
@@ -91,7 +97,7 @@ class X11Watcher(QObject):
         )
 
     def _available_types(self) -> set[str]:
-        available = set()
+        available = set(self._mime_data.formats())
         if self._mime_data.hasText():
             available.add(MIME_PLAIN)
         if self._mime_data.hasHtml():
@@ -116,4 +122,4 @@ class X11Watcher(QObject):
             buffer.open(QIODevice.OpenModeFlag.WriteOnly)
             image.save(buffer, "PNG")
             return bytes(buffer.data())
-        raise ValueError(f"unknown mime: {mime}")
+        return bytes(self._mime_data.data(mime))
