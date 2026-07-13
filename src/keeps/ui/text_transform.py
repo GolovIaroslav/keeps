@@ -79,20 +79,24 @@ def new_guid(_text: str, factory: Callable[[], uuid.UUID] = uuid.uuid4) -> str:
     return str(factory())
 
 
-def is_valid_json(text: str) -> bool:
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _pretty_json_or_none(text: str) -> str | None:
     try:
-        json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return True
+        value = json.loads(text, parse_constant=_reject_json_constant)
+        return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+        return None
+
+
+def is_valid_json(text: str) -> bool:
+    return _pretty_json_or_none(text) is not None
 
 
 def pretty_json(text: str) -> str:
-    try:
-        value = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return text
-    return json.dumps(value, ensure_ascii=False, indent=2)
+    return _pretty_json_or_none(text) or text
 
 
 def camel_case(text: str) -> str:

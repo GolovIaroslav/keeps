@@ -76,10 +76,20 @@ def test_trim_whitespace(text, expected):
 
 
 def test_transforms_registry_matches_functions():
-    assert TRANSFORMS["UPPERCASE"] is to_upper
-    assert TRANSFORMS["lowercase"] is to_lower
-    assert TRANSFORMS["Capitalize"] is capitalize
-    assert TRANSFORMS["Trim whitespace"] is trim_whitespace
+    assert list(TRANSFORMS.items()) == [
+        ("UPPERCASE", to_upper),
+        ("lowercase", to_lower),
+        ("Capitalize", capitalize),
+        ("Trim whitespace", trim_whitespace),
+        ("Remove line feeds", remove_line_feeds),
+        ("Sentence case", sentence_case),
+        ("Invert case", invert_case),
+        ("Paste + timestamp", append_timestamp),
+        ("Slugify", slugify),
+        ("New GUID", new_guid),
+        ("JSON pretty-print", pretty_json),
+        ("CamelCase", camel_case),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -133,6 +143,18 @@ def test_json_pretty_print_and_validation():
     assert pretty_json(source) == '{\n  "message": "привет",\n  "items": [\n    1,\n    2\n  ]\n}'
     assert is_valid_json("") is False
     assert pretty_json("not json") == "not json"
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_json_pretty_print_rejects_non_standard_constants(constant):
+    assert is_valid_json(constant) is False
+    assert pretty_json(constant) == constant
+
+
+def test_json_pretty_print_rejects_unserializably_deep_input():
+    source = "[" * 1100 + "0" + "]" * 1100
+    assert is_valid_json(source) is False
+    assert pretty_json(source) == source
 
 
 @pytest.mark.parametrize(

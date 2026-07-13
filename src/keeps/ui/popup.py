@@ -735,7 +735,7 @@ class PopupWindow(QWidget):
             special_menu = menu.addMenu(self.tr("Special Paste"))
             for label, transform in text_transform.TRANSFORMS.items():
                 action = special_menu.addAction(
-                    label,
+                    self.tr(label),
                     lambda _checked=False, t=transform: self._special_paste(clip.id, t),
                 )
                 if label == "JSON pretty-print":
