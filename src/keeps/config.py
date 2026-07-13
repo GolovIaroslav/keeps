@@ -29,6 +29,12 @@ DEFAULTS: dict[str, bool | int | str] = {
         '"xterm":"ctrl+shift+v","yakuake":"ctrl+shift+v"}'
     ),
     "popup/keep_search_after_paste": False,
+    "buffers/1/copy_hotkey": "",
+    "buffers/1/paste_hotkey": "",
+    "buffers/2/copy_hotkey": "",
+    "buffers/2/paste_hotkey": "",
+    "buffers/3/copy_hotkey": "",
+    "buffers/3/paste_hotkey": "",
     "capture/store_html": True,
     "capture/store_images": True,
     "capture/store_files": True,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QBuffer, QIODevice, QObject, Signal
 from PySide6.QtGui import QClipboard, QGuiApplication, QImage
 
@@ -37,12 +39,20 @@ class X11Watcher(QObject):
         self._clipboard: QClipboard = QGuiApplication.clipboard()
         self._mime_data = None
         self._clipboard.dataChanged.connect(self._on_changed)
+        self._buffer_capture: Callable[[str, dict[str, bytes]], None] | None = None
 
     def start(self) -> None:
         pass  # QClipboard is already live once QApplication exists.
 
     def stop(self) -> None:
         self._clipboard.dataChanged.disconnect(self._on_changed)
+
+    def capture_next_for_buffer(self, callback: Callable[[str, dict[str, bytes]], None]) -> None:
+        """Consume the next external supported selection before Store.add()."""
+        self._buffer_capture = callback
+
+    def cancel_buffer_capture(self) -> None:
+        self._buffer_capture = None
 
     def _on_changed(self) -> None:
         # Our own clipboard write (popup paste/copy) also fires dataChanged;
@@ -51,8 +61,6 @@ class X11Watcher(QObject):
         # pointless re-capture of our own data.)
         if self._clipboard.ownsClipboard():
             return
-        if self.guard.consume_skip():
-            return
         self._mime_data = self._clipboard.mimeData()
         available = self._available_types()
         result = build_bundle(available, self._read_mime, self._max_item_mb)
@@ -60,6 +68,13 @@ class X11Watcher(QObject):
         if result is None:
             return
         kind, mime_data = result
+        callback = self._buffer_capture
+        if callback is not None:
+            self._buffer_capture = None
+            callback(kind, mime_data)
+            return
+        if self.guard.consume_skip():
+            return
         if not self._should_store(kind):
             return
         clip_id = self._store.add(kind, mime_data)

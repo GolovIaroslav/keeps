@@ -4,6 +4,8 @@ import pytest
 
 from keeps.paste import (
     active_app_class,
+    copy_command,
+    inject_copy,
     inject_paste,
     injection_environment,
     notify_paste_unavailable,
@@ -33,6 +35,17 @@ def test_paste_command_wayland_uses_ydotool_raw_keycodes():
 def test_paste_command_x11_uses_xdotool_named_key():
     command = paste_command("x11", which=lambda tool: "/usr/bin/xdotool")
     assert command == ["xdotool", "key", "ctrl+v"]
+
+
+@pytest.mark.parametrize(
+    "backend,expected",
+    [
+        ("wayland", ["ydotool", "key", "29:1", "46:1", "46:0", "29:0"]),
+        ("x11", ["xdotool", "key", "ctrl+c"]),
+    ],
+)
+def test_copy_command_uses_the_platform_copy_chord(backend, expected):
+    assert copy_command(backend, lambda tool: f"/usr/bin/{tool}") == expected
 
 
 @pytest.mark.parametrize(
@@ -146,6 +159,17 @@ def test_inject_paste_runs_command_and_returns_true():
     result = inject_paste("x11", which=lambda tool: "/usr/bin/xdotool", runner=runner)
     assert result is True
     assert calls == [["xdotool", "key", "ctrl+v"]]
+
+
+def test_inject_copy_runs_command_and_returns_true():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+
+    assert inject_copy("x11", which=lambda _tool: "/usr/bin/xdotool", runner=runner)
+    assert calls[0][0] == ["xdotool", "key", "ctrl+c"]
+    assert calls[0][1]["timeout"] > 0
 
 
 def test_inject_paste_process_failure_returns_false():

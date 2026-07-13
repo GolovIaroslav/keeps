@@ -13,7 +13,6 @@ from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
     QFileSystemWatcher,
-    QMimeData,
     QModelIndex,
     QObject,
     QRunnable,
@@ -21,13 +20,11 @@ from PySide6.QtCore import (
     Qt,
     QThreadPool,
     QTimer,
-    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
     QGuiApplication,
     QIcon,
-    QImage,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
@@ -52,6 +49,8 @@ from PySide6.QtWidgets import (
 from keeps import config, multi_paste, paste
 from keeps.ai import ranking
 from keeps.ai.runtime import AiRuntime
+from keeps.clipboard import make_mime_data
+from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clip_registry import MAX_GLOBAL_CLIP_HOTKEYS
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
 from keeps.search import MatchReason, remember_query
@@ -370,6 +369,7 @@ class PopupWindow(QWidget):
         parent: QWidget | None = None,
         *,
         clip_hotkeys: ClipGlobalHotkeyManager | None = None,
+        buffer_hotkeys: CopyBufferHotkeyManager | None = None,
     ) -> None:
         # Qt.WindowType.Popup would give us free hide-on-outside-click, but its
         # Wayland grab requires a focused transient parent — we have none (a
@@ -389,6 +389,7 @@ class PopupWindow(QWidget):
         self._preserve_search_once = False
         self._target_app_class: str | None = None
         self._clip_hotkeys = clip_hotkeys
+        self._buffer_hotkeys = buffer_hotkeys
         self._local_hotkeys: dict[int, QShortcut] = {}
         self.model = ClipListModel(store, ai_runtime)
 
@@ -513,6 +514,10 @@ class PopupWindow(QWidget):
     def set_clip_hotkey_manager(self, manager: ClipGlobalHotkeyManager) -> None:
         """Attach the daemon-owned global action registry after popup creation."""
         self._clip_hotkeys = manager
+
+    def set_buffer_hotkey_manager(self, manager: CopyBufferHotkeyManager) -> None:
+        """Let the popup's Settings path apply buffer bindings immediately."""
+        self._buffer_hotkeys = manager
 
     def _hotkey_error_text(self, error: str) -> str:
         messages = {
@@ -1094,23 +1099,7 @@ class PopupWindow(QWidget):
 
     @staticmethod
     def _set_clipboard(mime_data: dict[str, bytes], plain_only: bool) -> None:
-        qmime = QMimeData()
-        plain = mime_data.get("text/plain")
-        if plain is not None:
-            qmime.setText(plain.decode("utf-8", errors="replace"))
-        if not plain_only:
-            html = mime_data.get("text/html")
-            if html is not None:
-                qmime.setHtml(html.decode("utf-8", errors="replace"))
-            png = mime_data.get("image/png")
-            if png is not None:
-                image = QImage.fromData(png, "PNG")
-                qmime.setImageData(image)
-            uri_list = mime_data.get("text/uri-list")
-            if uri_list is not None:
-                urls = [QUrl(line) for line in uri_list.decode("utf-8").splitlines() if line]
-                qmime.setUrls(urls)
-        QGuiApplication.clipboard().setMimeData(qmime)
+        QGuiApplication.clipboard().setMimeData(make_mime_data(mime_data, plain_only=plain_only))
 
     def _schedule_paste_injection(self, clip_id: int, plain_only: bool) -> None:
         # Plain-vs-rich is already decided by what's on the clipboard
@@ -1164,7 +1153,10 @@ class PopupWindow(QWidget):
         # Mirrors app.py's on_settings_requested (tray path) exactly, so
         # Settings behaves identically whether opened from the tray or here.
         SettingsDialog(
-            self._ai_runtime, self.store, clip_hotkeys=self._clip_hotkeys
+            self._ai_runtime,
+            self.store,
+            clip_hotkeys=self._clip_hotkeys,
+            buffer_hotkeys=self._buffer_hotkeys,
         ).exec()
         self.refresh()
         # Qt doesn't reliably restore focus to search_edit after a modal

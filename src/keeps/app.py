@@ -141,6 +141,8 @@ def _run_daemon(show_immediately: bool) -> int:
 
     from keeps import desktop_entry
     from keeps.ai.runtime import AiRuntime
+    from keeps.copy_buffers import CopyBufferController
+    from keeps.hotkey.buffers import CopyBufferHotkeyManager
     from keeps.hotkey.clips import ClipGlobalHotkeyManager
     from keeps.ui.popup import PopupWindow
     from keeps.ui.settings import SettingsDialog
@@ -214,7 +216,15 @@ def _run_daemon(show_immediately: bool) -> int:
     popup.set_clip_hotkey_manager(clip_hotkeys)
     clip_hotkeys.restore(store.clips_with_hotkeys(global_only=True))
 
+    copy_buffers = CopyBufferController(store, watcher, settings, qt_app)
+    buffer_hotkeys = CopyBufferHotkeyManager(
+        copy_buffers.copy_to_buffer, copy_buffers.paste_from_buffer, qt_app
+    )
+    popup.set_buffer_hotkey_manager(buffer_hotkeys)
+    buffer_hotkeys.restore(settings)
+
     tray = TrayIcon()
+    copy_buffers.status_changed.connect(tray.show_message)
     tray.show_requested.connect(popup.show_popup)
 
     def on_capture_paused_changed(paused: bool) -> None:
@@ -226,13 +236,19 @@ def _run_daemon(show_immediately: bool) -> int:
     tray.capture_paused_changed.connect(on_capture_paused_changed)
 
     def on_settings_requested() -> None:
-        SettingsDialog(ai_runtime, store, clip_hotkeys=clip_hotkeys).exec()
+        SettingsDialog(
+            ai_runtime,
+            store,
+            clip_hotkeys=clip_hotkeys,
+            buffer_hotkeys=buffer_hotkeys,
+        ).exec()
         popup.refresh()
 
     tray.settings_requested.connect(on_settings_requested)
 
     def on_quit_requested() -> None:
         clip_hotkeys.deactivate_all()
+        buffer_hotkeys.deactivate_all()
         if hotkey is not None:
             hotkey.unregister()
         watcher.stop()

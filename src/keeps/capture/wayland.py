@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QProcess, Signal
 from PySide6.QtGui import QGuiApplication
@@ -47,6 +48,7 @@ class WaylandWatcher(QObject):
         self._process.setProgram("wl-paste")
         self._process.setArguments(_WATCH_ARGS)
         self._process.readyReadStandardOutput.connect(self._on_triggered)
+        self._buffer_capture: Callable[[str, dict[str, bytes]], None] | None = None
 
     def start(self) -> None:
         self._process.start()
@@ -54,6 +56,17 @@ class WaylandWatcher(QObject):
     def stop(self) -> None:
         self._process.terminate()
         self._process.waitForFinished(1000)
+
+    def capture_next_for_buffer(self, callback: Callable[[str, dict[str, bytes]], None]) -> None:
+        """Consume the next external supported selection for a copy-buffer operation.
+
+        The callback runs before Store.add(), so temporary Ctrl+C contents do
+        not enter normal history. Only the controller arms this one-shot hook.
+        """
+        self._buffer_capture = callback
+
+    def cancel_buffer_capture(self) -> None:
+        self._buffer_capture = None
 
     def _on_triggered(self) -> None:
         self._process.readAllStandardOutput()
@@ -64,22 +77,30 @@ class WaylandWatcher(QObject):
         # there is nothing to capture anyway.
         if QGuiApplication.clipboard().ownsClipboard():
             return
+        result = self._capture_bundle()
+        if result is None:
+            return
+        callback = self._buffer_capture
+        if callback is not None:
+            self._buffer_capture = None
+            callback(*result)
+            return
         if self.guard.consume_skip():
             return
-        self._capture()
+        self._store_bundle(*result)
 
-    def _capture(self) -> None:
+    def _capture_bundle(self) -> tuple[str, dict[str, bytes]] | None:
         available = self._list_types()
         if available is None:
-            return
+            return None
         try:
             result = build_bundle(available, self._read_mime, self._max_item_mb)
         except subprocess.TimeoutExpired:
             logger.warning("wl-paste read timed out; clipboard owner unresponsive, skipping clip")
-            return
-        if result is None:
-            return
-        kind, mime_data = result
+            return None
+        return result
+
+    def _store_bundle(self, kind: str, mime_data: dict[str, bytes]) -> None:
         if not self._should_store(kind):
             return
         clip_id = self._store.add(kind, mime_data)

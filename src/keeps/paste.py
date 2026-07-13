@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # errors with "Unknown command"; this raw press/release sequence works).
 YDOTOOL_CTRL_V = ["29:1", "47:1", "47:0", "29:0"]
 YDOTOOL_CTRL_SHIFT_V = ["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
+YDOTOOL_CTRL_C = ["29:1", "46:1", "46:0", "29:0"]
 
 # Defense in depth: inject_paste() runs off the Qt main thread (see
 # ui/popup.py::_PasteInjectionTask), but a hung ydotool/ydotoold would still
@@ -46,6 +47,13 @@ def paste_command(
         keys = YDOTOOL_CTRL_SHIFT_V if shortcut == "ctrl+shift+v" else YDOTOOL_CTRL_V
         return ["ydotool", "key", *keys] if which("ydotool") else None
     return ["xdotool", "key", shortcut] if which("xdotool") else None
+
+
+def copy_command(backend: str, which: Callable[[str], str | None]) -> list[str] | None:
+    """Argv to inject Ctrl+C for a copy-buffer capture, or None if unavailable."""
+    if backend == "wayland":
+        return ["ydotool", "key", *YDOTOOL_CTRL_C] if which("ydotool") else None
+    return ["xdotool", "key", "ctrl+c"] if which("xdotool") else None
 
 
 def active_app_class(
@@ -139,6 +147,30 @@ def inject_paste(
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         logger.warning("paste: injection failed: %s", exc)
+        return False
+    return True
+
+
+def inject_copy(
+    backend: str,
+    which: Callable[[str], str | None],
+    runner: Callable[..., object],
+) -> bool:
+    """Run Ctrl+C injection for a copy buffer, safely returning on failure."""
+    command = copy_command(backend, which)
+    if command is None:
+        logger.warning("copy buffer: no injection tool found for backend=%s", backend)
+        return False
+    try:
+        runner(
+            command,
+            check=True,
+            capture_output=True,
+            timeout=PASTE_INJECT_TIMEOUT_SECONDS,
+            env=injection_environment(backend),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("copy buffer: injection failed: %s", exc)
         return False
     return True
 

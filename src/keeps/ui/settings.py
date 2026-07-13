@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from keeps import __version__, autostart, config, diagnostics, multi_paste, paste
 from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
+from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
 from keeps.store import Store
 
@@ -126,6 +127,7 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
         *,
         clip_hotkeys: ClipGlobalHotkeyManager | None = None,
+        buffer_hotkeys: CopyBufferHotkeyManager | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(self.tr("Keeps Settings"))
@@ -133,6 +135,7 @@ class SettingsDialog(QDialog):
         self._ai_runtime = ai_runtime
         self._store = store
         self._clip_hotkeys = clip_hotkeys
+        self._buffer_hotkeys = buffer_hotkeys
 
         tabs = QTabWidget(self)
         tabs.addTab(self._build_general_tab(), self.tr("General"))
@@ -345,6 +348,34 @@ class SettingsDialog(QDialog):
             )
         layout.addWidget(self._clip_hotkey_table)
         self._refresh_clip_hotkey_table()
+        layout.addWidget(QLabel(self.tr("Copy buffers")))
+        buffer_explanation = QLabel(
+            self.tr(
+                "Copy and Paste actions are global KGlobalAccel shortcuts. Empty fields disable "
+                "an action. Buffers preserve their contents across restarts and do not enter "
+                "history."
+            )
+        )
+        buffer_explanation.setWordWrap(True)
+        layout.addWidget(buffer_explanation)
+        self._copy_buffer_table = QTableWidget(0, 4)
+        self._copy_buffer_table.setHorizontalHeaderLabels(
+            [
+                self.tr("Buffer"),
+                self.tr("Current contents"),
+                self.tr("Copy hotkey"),
+                self.tr("Paste hotkey"),
+            ]
+        )
+        self._copy_buffer_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        for column in (0, 2, 3):
+            self._copy_buffer_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        layout.addWidget(self._copy_buffer_table)
+        self._refresh_copy_buffer_table()
         return widget
 
     def _refresh_clip_hotkey_table(self) -> None:
@@ -377,6 +408,47 @@ class SettingsDialog(QDialog):
             self._clip_hotkeys.unregister(clip_id)
         self._store.set_hotkey(clip_id, None, global_hotkey=False)
         self._refresh_clip_hotkey_table()
+
+    def _refresh_copy_buffer_table(self) -> None:
+        table = self._copy_buffer_table
+        table.setRowCount(0)
+        if self._store is None:
+            return
+        buffers = {buffer.slot: buffer for buffer in self._store.copy_buffers()}
+        for slot in (1, 2, 3):
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(str(slot)))
+            buffer = buffers.get(slot)
+            preview = buffer.preview.replace("\n", " ") if buffer else self.tr("(empty)")
+            table.setItem(row, 1, QTableWidgetItem(preview))
+            for column, operation in ((2, "copy"), (3, "paste")):
+                key = f"buffers/{slot}/{operation}_hotkey"
+                edit = QLineEdit(str(config.get(self._settings, key)))
+                edit.setPlaceholderText(self.tr("Not assigned"))
+                edit.editingFinished.connect(
+                    lambda slot=slot, operation=operation, edit=edit: self._save_buffer_hotkey(
+                        slot, operation, edit
+                    )
+                )
+                table.setCellWidget(row, column, edit)
+
+    def _save_buffer_hotkey(self, slot: int, operation: str, edit: QLineEdit) -> None:
+        sequence = edit.text().strip()
+        error = (
+            self._buffer_hotkeys.configure(slot, operation, sequence)
+            if self._buffer_hotkeys is not None
+            else None
+        )
+        if error:
+            QMessageBox.warning(
+                self,
+                self.tr("Hotkey unavailable"),
+                self.tr("Could not register this global hotkey ({error}).").format(error=error),
+            )
+            edit.setText(str(config.get(self._settings, f"buffers/{slot}/{operation}_hotkey")))
+            return
+        self._save(f"buffers/{slot}/{operation}_hotkey", sequence)
 
     # -- Capture ---------------------------------------------------------
 

@@ -48,6 +48,39 @@ def test_roundtrip_image(store):
     assert store.all()[0].preview == "[image 1x1]"
 
 
+def test_copy_buffers_are_persistent_and_do_not_touch_history(tmp_path):
+    path = tmp_path / "keeps.db"
+    store = Store(path)
+    history_id = store.add("text", {"text/plain": b"history"})
+
+    store.set_copy_buffer(1, "html", {"text/plain": b"buffer", "text/html": b"<b>buffer</b>"})
+    store.set_copy_buffer(3, "image", {"image/png": PNG_1X1})
+
+    assert [clip.id for clip in store.all()] == [history_id]
+    buffer_one = store.get_copy_buffer(1)
+    assert buffer_one is not None
+    assert buffer_one.slot == 1
+    assert buffer_one.kind == "html"
+    assert buffer_one.mime_data == {"text/plain": b"buffer", "text/html": b"<b>buffer</b>"}
+    assert [item.slot for item in store.copy_buffers()] == [1, 3]
+    store.close()
+
+    reopened = Store(path)
+    assert reopened.get_copy_buffer(3).mime_data == {"image/png": PNG_1X1}  # type: ignore[union-attr]
+    assert [clip.id for clip in reopened.all()] == [history_id]
+    reopened.close()
+
+
+def test_copy_buffer_replaces_its_slot_without_dedup_or_trim(store):
+    store.max_items = 1
+    store.add("text", {"text/plain": b"only history"})
+    store.set_copy_buffer(2, "text", {"text/plain": b"first"})
+    store.set_copy_buffer(2, "text", {"text/plain": b"second"})
+
+    assert store.get_copy_buffer(2).mime_data == {"text/plain": b"second"}  # type: ignore[union-attr]
+    assert len(store.all()) == 1
+
+
 def test_dedup_move_to_top(store):
     first = store.add("text", {"text/plain": b"first"})
     time.sleep(0.002)
@@ -637,7 +670,7 @@ def test_clip_hotkey_conflict_excludes_the_clip_being_edited(store):
     assert store.hotkey_conflict("Ctrl+1", exclude_clip_id=second) == first
 
 
-def test_v3_to_v4_hotkey_migration_backs_up_and_preserves_clips(tmp_path):
+def test_v3_to_v5_hotkey_and_copy_buffer_migration_backs_up_and_preserves_clips(tmp_path):
     db_path = tmp_path / "keeps.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(store_module.SCHEMA)
@@ -659,10 +692,12 @@ def test_v3_to_v4_hotkey_migration_backs_up_and_preserves_clips(tmp_path):
     assert clip.hotkey is None and clip.hotkey_global is False
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()
     assert {"hotkey", "hotkey_global"} <= columns
+    assert {"copy_buffers", "copy_buffer_data"} <= tables
 
 
 def test_mime_sizes_report_exact_stored_bytes(store):

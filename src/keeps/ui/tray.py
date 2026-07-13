@@ -40,6 +40,10 @@ class TrayIcon(QObject):
     def show(self) -> None:
         self._tray.show()
 
+    def show_message(self, message: str) -> None:
+        """Best-effort transient feedback for background-only actions."""
+        self._tray.showMessage("Keeps", message, QSystemTrayIcon.MessageIcon.Information, 4_000)
+
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.show_requested.emit()

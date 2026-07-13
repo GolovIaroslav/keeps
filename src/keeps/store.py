@@ -50,7 +50,7 @@ PREVIEW_MAX_CHARS = 300
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
 # entries for v2 and beyond.
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 
 
 def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
@@ -84,10 +84,25 @@ def _migrate_v4_clip_hotkeys(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE clips ADD COLUMN hotkey_global INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_v5_copy_buffers(conn: sqlite3.Connection) -> None:
+    """Add three persistent slots kept independently from clipboard history."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS copy_buffers ("
+        "slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 3), "
+        "kind TEXT NOT NULL, captured_at INTEGER NOT NULL, preview TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS copy_buffer_data ("
+        "slot INTEGER NOT NULL REFERENCES copy_buffers(slot) ON DELETE CASCADE, "
+        "mime TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(slot, mime))"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v2_groups,
     3: _migrate_v3_alias,
     4: _migrate_v4_clip_hotkeys,
+    5: _migrate_v5_copy_buffers,
 }
 
 BACKUP_KEEP = 3
@@ -138,6 +153,17 @@ class Group:
     id: int
     name: str
     sort_order: int
+
+
+@dataclass(frozen=True)
+class CopyBuffer:
+    """One persistent, non-history clipboard buffer (PLAN.md Ф21)."""
+
+    slot: int
+    kind: str
+    captured_at: int
+    preview: str
+    mime_data: dict[str, bytes]
 
 
 def normalize(text: str) -> str:
@@ -558,6 +584,58 @@ class Store:
             "SELECT mime, data FROM clip_data WHERE clip_id = ?", (clip_id,)
         ).fetchall()
         return {row["mime"]: row["data"] for row in rows}
+
+    @staticmethod
+    def _validate_copy_buffer(slot: int, kind: str, mime_data: dict[str, bytes]) -> None:
+        if slot not in (1, 2, 3):
+            raise ValueError("copy buffer slot must be 1, 2, or 3")
+        # Reuse the history's supported canonical bundles. Arbitrary MIME
+        # fidelity is deliberately deferred to Ф25.
+        _canonical_bytes(kind, mime_data)
+
+    def set_copy_buffer(self, slot: int, kind: str, mime_data: dict[str, bytes]) -> None:
+        """Replace one persistent copy-buffer slot without touching history."""
+        self._validate_copy_buffer(slot, kind, mime_data)
+        captured_at = int(time.time() * 1000)
+        preview = build_preview(kind, mime_data)
+        self._conn.execute(
+            "INSERT INTO copy_buffers(slot, kind, captured_at, preview) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(slot) DO UPDATE SET kind = excluded.kind, "
+            "captured_at = excluded.captured_at, preview = excluded.preview",
+            (slot, kind, captured_at, preview),
+        )
+        self._conn.execute("DELETE FROM copy_buffer_data WHERE slot = ?", (slot,))
+        self._conn.executemany(
+            "INSERT INTO copy_buffer_data(slot, mime, data) VALUES (?, ?, ?)",
+            [(slot, mime, data) for mime, data in mime_data.items()],
+        )
+        self._conn.commit()
+
+    def get_copy_buffer(self, slot: int) -> CopyBuffer | None:
+        if slot not in (1, 2, 3):
+            raise ValueError("copy buffer slot must be 1, 2, or 3")
+        row = self._conn.execute(
+            "SELECT slot, kind, captured_at, preview FROM copy_buffers WHERE slot = ?", (slot,)
+        ).fetchone()
+        if row is None:
+            return None
+        data_rows = self._conn.execute(
+            "SELECT mime, data FROM copy_buffer_data WHERE slot = ? ORDER BY mime", (slot,)
+        ).fetchall()
+        return CopyBuffer(
+            slot=row["slot"],
+            kind=row["kind"],
+            captured_at=row["captured_at"],
+            preview=row["preview"],
+            mime_data={data_row["mime"]: data_row["data"] for data_row in data_rows},
+        )
+
+    def copy_buffers(self) -> list[CopyBuffer]:
+        return [
+            buffer
+            for slot in (1, 2, 3)
+            if (buffer := self.get_copy_buffer(slot)) is not None
+        ]
 
     def mime_sizes(self, clip_id: int) -> list[tuple[str, int]]:
         rows = self._conn.execute(
