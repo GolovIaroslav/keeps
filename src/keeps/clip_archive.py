@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import base64
 import gzip
+import io
 import json
 from dataclasses import dataclass
 
 FORMAT = "keeps.clip-archive"
 VERSION = 1
+
+# A tiny crafted "archive" can gzip-expand to many gigabytes; cap what an
+# import is ever willing to materialize in memory.
+MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
 
 _CANONICAL_MIME = {
     "text": "text/plain",
@@ -75,8 +80,15 @@ def encode_archive(clips: list[ArchiveClip]) -> bytes:
 def decode_archive(payload: bytes) -> list[ArchiveClip]:
     """Decode and validate a user-selected archive before changing the store."""
     try:
-        document = json.loads(gzip.decompress(payload).decode("utf-8"))
-    except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        with gzip.GzipFile(fileobj=io.BytesIO(payload)) as stream:
+            raw = stream.read(MAX_DECOMPRESSED_BYTES + 1)
+    except (EOFError, OSError) as exc:
+        raise ValueError("Not a valid Keeps archive.") from exc
+    if len(raw) > MAX_DECOMPRESSED_BYTES:
+        raise ValueError("Archive is too large to import.")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("Not a valid Keeps archive.") from exc
     if (
         not isinstance(document, dict)

@@ -48,6 +48,16 @@ def test_archive_rejects_invalid_payload(payload):
         decode_archive(payload)
 
 
+def test_archive_rejects_gzip_bomb(monkeypatch):
+    import gzip
+
+    from keeps import clip_archive
+
+    monkeypatch.setattr(clip_archive, "MAX_DECOMPRESSED_BYTES", 1024)
+    with pytest.raises(ValueError, match="too large"):
+        decode_archive(gzip.compress(b"0" * 4096))
+
+
 def test_imported_duplicate_does_not_move_existing_clip_to_the_top(tmp_path):
     store = Store(tmp_path / "keeps.db")
     duplicate_id = store.add("text", {"text/plain": b"already here"})
