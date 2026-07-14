@@ -2,7 +2,7 @@
 
 A [Ditto](https://github.com/sabrogden/Ditto)-inspired clipboard manager for Linux. Wayland-first, KDE-first, light and fast.
 
-> **Status: v0.2.0.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
+> **Status: v0.3.0.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, workbench, persistent copy buffers, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
 
 ## Why
 
@@ -14,7 +14,9 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 - **Search as you type**, Cyrillic-aware.
 - **Predictable ordering**: a used item always jumps to the top. Always.
 - **Multi-format**: plain text, rich text (HTML), images, file lists. Optionally preserve extra source MIME formats too. Paste-as-plain-text with one key.
-- History in SQLite (survives reboots), pinned items, tray icon, autostart, GUI settings.
+- History in SQLite (survives reboots), pinned items, tray icon, autostart, GUI settings, and a configurable popup keymap.
+- Clipboard workbench for combining, reordering, transforming, and pasting several clips; persistent copy buffers with configurable global actions.
+- Per-clip paste shortcuts and terminal-aware paste selection on KDE Wayland when `kdotool` is available.
 - No telemetry, no accounts, no network calls except an explicit, opt-in AI model download (semantic text search + OCR).
 
 ## Install
@@ -33,7 +35,7 @@ uv sync
 uv run keeps
 ```
 
-`ydotool` is optional: without it, Keeps still copies to the clipboard but can't auto-paste. For the opt-in AI search (OCR + semantic text search), also run `uv sync --extra ai` — model weights are downloaded separately, on request, from the app's own Model management settings. Run `keeps status` to check what's available.
+`ydotool` is optional: without it, Keeps still copies to the clipboard but can't auto-paste. On KDE Wayland, install the optional `kdotool` helper for per-application paste shortcuts. For the opt-in AI search (OCR + semantic text search), also run `uv sync --extra ai` — model weights are downloaded separately, on request, from the app's own Model management settings. Run `keeps status` to check what's available.
 
 ## Usage
 
@@ -42,7 +44,7 @@ uv run keeps
 - `keeps show` — show the popup without toggling it closed.
 - `keeps status` — run diagnostics (wl-paste, ydotool, kglobalaccel, session type, Klipper, AI models).
 
-The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; a single clip is exported in its real format (for example an image as PNG), while `Export as Keeps archive...` creates a portable `.keeps.json` backup. Use the popup title bar to create or import clips. Settings (including the scrollable `Paste` tab) live at `~/.config/keeps/keeps.ini`. The default interface language is English; `Settings → General → Language` also offers Russian, Spanish, German, French, Brazilian Portuguese, Simplified Chinese, and Japanese. Restart Keeps after changing it.
+The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; a single clip is exported in its real format (for example an image as PNG), while `Export as Keeps archive...` creates a portable `.keeps.json` backup. Use the popup title bar to create or import clips. Settings (including the scrollable `Paste` tab, popup keymap, per-clip shortcuts, and persistent copy buffers) live at `~/.config/keeps/keeps.ini`. The default interface language is English; `Settings → General → Language` also offers Russian, Spanish, German, French, Brazilian Portuguese, Simplified Chinese, and Japanese. Restart Keeps after changing it.
 
 AI indexing uses one background worker so OCR and text embeddings cannot multiply model memory across the process-wide Qt thread pool. `Settings → AI → Unload model from RAM after idle` defaults to 10 minutes; set it to `0` only if you explicitly want models to stay loaded. Loading a model again on the next OCR or semantic query is automatic.
 

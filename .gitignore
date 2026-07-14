@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+AppDir/
+*.AppImage
 .venv/
 .python-version
 
@@ -30,3 +32,4 @@ PLAN.md
 ditto-features.md
 plan-v2.md
 MANUAL_TESTING.md
+*-research.md

@@ -1,6 +1,6 @@
 [project]
 name = "keeps"
-version = "0.2.0"
+version = "0.3.0"
 description = "Ditto-inspired clipboard manager for Linux (Wayland-first, KDE-first)"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
