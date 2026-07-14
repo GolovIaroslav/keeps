@@ -617,6 +617,39 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
 # the language choice covers the settings tabs and the RAG mode badge too.
 _TRANSLATIONS["ru"].update(
     {
+        "Copy buffer operation is already in progress.": (
+            "Операция с copy-буфером уже выполняется."
+        ),
+        "Copy buffer {slot} is empty.": "Copy-буфер {slot} пуст.",
+        "Could not read the current clipboard; buffer unchanged.": (
+            "Не удалось прочитать текущий буфер обмена; copy-буфер не изменён."
+        ),
+        "Current clipboard is too large to preserve safely; buffer unchanged.": (
+            "Текущий буфер обмена слишком большой для безопасного сохранения; "
+            "copy-буфер не изменён."
+        ),
+        "Saved to copy buffer {slot}.": "Сохранено в copy-буфер {slot}.",
+        "Copy buffer timed out; buffer unchanged.": (
+            "Время ожидания copy-буфера истекло; буфер не изменён."
+        ),
+        "Clipboard changed before paste; buffer paste cancelled.": (
+            "Буфер обмена изменился до вставки; вставка из copy-буфера отменена."
+        ),
+        "Copy buffer failed; buffer unchanged.": (
+            "Операция copy-буфера не удалась; буфер не изменён."
+        ),
+        "Copy buffer paste failed; clipboard restored.": (
+            "Вставка из copy-буфера не удалась; буфер обмена восстановлен."
+        ),
+        "Archive is too large to import.": "Архив слишком большой для импорта.",
+        "Not a valid Keeps archive.": "Это не архив Keeps.",
+        "Unsupported Keeps archive format.": "Неподдерживаемый формат архива Keeps.",
+        "Archive contains an invalid clip.": "Архив содержит повреждённый клип.",
+        "Archive contains an invalid MIME format.": "Архив содержит некорректный MIME-формат.",
+        "Archive contains invalid base64 data.": "Архив содержит некорректные base64-данные.",
+        "Archive clip is missing its canonical MIME format.": (
+            "У клипа в архиве отсутствует канонический MIME-формат."
+        ),
         "General": "Общие",
         "Paste": "Вставка",
         "Keys": "Клавиши",

@@ -92,7 +92,7 @@ class CopyBufferController(QObject):
     def copy_to_buffer(self, slot: int) -> bool:
         """Inject Ctrl+C, intercept its next capture event, then restore the clipboard."""
         if self.busy:
-            self._status("Copy buffer operation is already in progress.")
+            self._status(self.tr("Copy buffer operation is already in progress."))
             return False
         snapshot = self._snapshot()
         if snapshot is None:
@@ -108,11 +108,11 @@ class CopyBufferController(QObject):
     def paste_from_buffer(self, slot: int) -> bool:
         """Temporarily publish a buffer, inject paste, then best-effort restore."""
         if self.busy:
-            self._status("Copy buffer operation is already in progress.")
+            self._status(self.tr("Copy buffer operation is already in progress."))
             return False
         buffer = self._store.get_copy_buffer(slot)
         if buffer is None:
-            self._status(f"Copy buffer {slot} is empty.")
+            self._status(self.tr("Copy buffer {slot} is empty.").format(slot=slot))
             return False
         snapshot = self._snapshot()
         if snapshot is None:
@@ -130,11 +130,13 @@ class CopyBufferController(QObject):
     def _snapshot(self) -> dict[str, bytes] | None:
         mime_data = QGuiApplication.clipboard().mimeData()
         if mime_data is None:
-            self._status("Could not read the current clipboard; buffer unchanged.")
+            self._status(self.tr("Could not read the current clipboard; buffer unchanged."))
             return None
         snapshot = snapshot_mime_data(mime_data, max_bytes=MAX_SNAPSHOT_BYTES)
         if snapshot is None:
-            self._status("Current clipboard is too large to preserve safely; buffer unchanged.")
+            self._status(
+                self.tr("Current clipboard is too large to preserve safely; buffer unchanged.")
+            )
         return snapshot
 
     def _run_injection(self, action: Callable[[], bool]) -> None:
@@ -154,7 +156,7 @@ class CopyBufferController(QObject):
         # force this write because a user may have copied newer content.
         self._restore_snapshot(operation.snapshot, force=True)
         self._operation = None
-        self._status(f"Saved to copy buffer {operation.slot}.")
+        self._status(self.tr("Saved to copy buffer {slot}.").format(slot=operation.slot))
 
     def _on_copy_timeout(self) -> None:
         operation = self._operation
@@ -163,7 +165,7 @@ class CopyBufferController(QObject):
         self._watcher.cancel_buffer_capture()
         self._restore_snapshot(operation.snapshot)
         self._operation = None
-        self._status("Copy buffer timed out; buffer unchanged.")
+        self._status(self.tr("Copy buffer timed out; buffer unchanged."))
 
     def _start_paste_injection(self) -> None:
         operation = self._operation
@@ -172,7 +174,7 @@ class CopyBufferController(QObject):
         # A newer clipboard owner means Ctrl+V would paste unrelated content.
         if not QGuiApplication.clipboard().ownsClipboard():
             self._operation = None
-            self._status("Clipboard changed before paste; buffer paste cancelled.")
+            self._status(self.tr("Clipboard changed before paste; buffer paste cancelled."))
             return
         backend = paste.session_backend()
         shortcut = operation.paste_shortcut or "ctrl+v"
@@ -190,14 +192,14 @@ class CopyBufferController(QObject):
                 self._watcher.cancel_buffer_capture()
                 self._restore_snapshot(operation.snapshot)
                 self._operation = None
-                self._status("Copy buffer failed; buffer unchanged.")
+                self._status(self.tr("Copy buffer failed; buffer unchanged."))
             return
         if success:
             self._paste_grace.start(POST_PASTE_GRACE_MS)
             return
         self._restore_snapshot(operation.snapshot)
         self._operation = None
-        self._status("Copy buffer paste failed; clipboard restored.")
+        self._status(self.tr("Copy buffer paste failed; clipboard restored."))
 
     def _restore_after_paste(self) -> None:
         operation = self._operation
@@ -213,5 +215,6 @@ class CopyBufferController(QObject):
             clipboard.setMimeData(restore_mime_data(snapshot))
 
     def _status(self, message: str) -> None:
+        """Emit an already-translated message (tr() must see the {slot} template)."""
         logger.info("copy buffer: %s", message)
-        self.status_changed.emit(self.tr(message))
+        self.status_changed.emit(message)

@@ -1265,7 +1265,9 @@ class PopupWindow(QWidget):
         try:
             records = clip_archive.decode_archive(Path(filename).read_bytes())
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, self.tr("Cannot import clips"), str(exc))
+            # tr() on the dynamic text: clip_archive's known error strings are
+            # catalog keys; anything else (OSError) passes through unchanged.
+            QMessageBox.warning(self, self.tr("Cannot import clips"), self.tr(str(exc)))
             self.search_edit.setFocus()
             return
         inserted = 0
