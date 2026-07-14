@@ -136,18 +136,18 @@ def _local_hotkey_error(sequence_text: str, reserved: set[str]) -> str | None:
     return "modifier-required"
 
 _MODE_BADGE_LABELS = {
-    ranking.SearchMode.BLENDED: "blended",
+    ranking.SearchMode.BLENDED: "auto",
     ranking.SearchMode.KEYWORD: "keywords",
     ranking.SearchMode.SEMANTIC: "meaning",
 }
 
 # Clicking the badge cycles modes the same way Ctrl+M does (PLAN.md §9);
-# the tooltip exists because "blended"/"keywords"/"meaning" alone read as
+# the tooltip exists because "auto"/"keywords"/"meaning" alone read as
 # unexplained jargon otherwise (user feedback 2026-07-11).
 _MODE_BADGE_TOOLTIPS = {
     ranking.SearchMode.BLENDED: (
         "Auto (default): exact matches first, semantically related results "
-        "blended in below them. Click to switch mode, or Ctrl+M."
+        "included below them. Click to switch mode, or Ctrl+M."
     ),
     ranking.SearchMode.KEYWORD: (
         "Keywords only: exact substring matches, no semantic ranking. "
@@ -386,7 +386,7 @@ class PopupWindow(QWidget):
         self.search_edit.setPlaceholderText(self.tr("Search clips..."))
         self.search_edit.installEventFilter(self)
 
-        # Search-mode badge (Ctrl+M cycles blended/keywords/meaning) -- only
+        # Search-mode badge (Ctrl+M cycles auto/keywords/meaning) -- only
         # shown when ai/rag_text_enabled, since there's nothing to switch
         # between otherwise (PLAN.md §9).
         self._mode_badge = QLabel(self)

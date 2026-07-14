@@ -83,7 +83,7 @@ HOTKEYS_HTML = """\
 <tr><td>F2</td><td>Edit: built-in editor (text clips only)</td></tr>
 <tr><td>Ctrl+P</td><td>pin/unpin the selected item(s)</td></tr>
 <tr><td>Ctrl+1..9</td><td>paste the Nth visible item (first 9 are numbered)</td></tr>
-<tr><td>Ctrl+M</td><td>cycle search mode (blended/keywords/meaning) &mdash;
+<tr><td>Ctrl+M</td><td>cycle search mode (auto/keywords/meaning) &mdash;
     only when semantic search is enabled</td></tr>
 <tr><td>Ctrl+scroll, Ctrl+Plus, Ctrl+Minus</td>
     <td>popup UI scale (remembered between sessions)</td></tr>
@@ -308,6 +308,22 @@ class SettingsDialog(QDialog):
         form.addRow(self.tr("Language"), language_combo)
         form.addRow(QLabel(self.tr("Language changes apply after restarting Keeps.")))
 
+        theme_combo = QComboBox()
+        for value, label in (
+            ("system", self.tr("System")),
+            ("light", self.tr("Light")),
+            ("dark", self.tr("Dark")),
+        ):
+            theme_combo.addItem(label, value)
+        theme_combo.setCurrentIndex(
+            max(0, theme_combo.findData(str(config.get(self._settings, "general/theme"))))
+        )
+        theme_combo.currentIndexChanged.connect(
+            lambda _index: self._on_theme_changed(str(theme_combo.currentData()))
+        )
+        theme_combo.setToolTip(self.tr("System follows your desktop theme."))
+        form.addRow(self.tr("Theme"), theme_combo)
+
         for key, label in (
             ("general/external_editor_text", self.tr("External editor — text")),
             ("general/external_editor_html", self.tr("External editor — HTML")),
@@ -333,12 +349,6 @@ class SettingsDialog(QDialog):
             )
             row_layout.addWidget(choose)
             form.addRow(label, row)
-
-        theme_combo = QComboBox()
-        theme_combo.addItems(["system", "light", "dark"])
-        theme_combo.setCurrentText(str(config.get(self._settings, "general/theme")))
-        theme_combo.currentTextChanged.connect(self._on_theme_changed)
-        form.addRow(self.tr("Theme"), theme_combo)
 
         autostart_box = QCheckBox()
         autostart_box.setChecked(autostart.is_autostart_enabled())

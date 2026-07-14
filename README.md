@@ -25,6 +25,11 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 
 Download the latest `keeps-*-x86_64.AppImage` from [Releases](https://github.com/GolovIaroslav/keeps/releases), `chmod +x` it, and run. Still needs `wl-clipboard` (Wayland) and, optionally, `ydotool` for auto-paste from the host system — see `keeps status` after first run.
 
+To update, quit Keeps and replace only the AppImage. User settings stay in
+`~/.config/keeps/keeps.ini` and clipboard history in `~/.local/share/keeps/keeps.db`
+(or the corresponding `XDG_CONFIG_HOME`/`XDG_DATA_HOME` directories), outside the
+AppImage.
+
 ### From source (Arch Linux)
 
 ```sh
@@ -62,7 +67,7 @@ AI indexing uses one background worker so OCR and text embeddings cannot multipl
 | `Ctrl+E` | edit in an external editor |
 | `Ctrl+P` | pin/unpin |
 | `Ctrl+1..9` | paste the Nth visible item |
-| `Ctrl+M` | cycle search mode: blended → keywords → meaning (only when AI text search is enabled) |
+| `Ctrl+M` | cycle search mode: auto → keywords → meaning (only when AI text search is enabled) |
 | `Esc` / focus loss | hide popup |
 
 On KDE, the global hotkey is registered via KGlobalAccel; on plain X11 desktops it falls back to a direct XGrabKey. On other Wayland compositors, Keeps tries the XDG GlobalShortcuts portal and falls back to a compositor-bound `keeps toggle` shortcut if the portal is unavailable or declined.

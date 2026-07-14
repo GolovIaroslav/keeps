@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QLockFile, QSettings
 
 from keeps.popup_keymap import DEFAULT_POPUP_KEYBINDINGS, setting_key
 
@@ -58,6 +60,87 @@ DEFAULTS: dict[str, bool | int | str] = {
     **{setting_key(action): sequence for action, sequence in DEFAULT_POPUP_KEYBINDINGS.items()},
 }
 
+_SETTINGS_CACHE: dict[Path, QSettings] = {}
+
+
+@contextmanager
+def _settings_lock(path: Path) -> Iterator[None]:
+    # Keep this separate from QSettings' own ``.lock`` file: QSettings may
+    # need its lock while the custom lock is held during a merge.
+    lock = QLockFile(f"{path}.keeps-lock")
+    lock.setStaleLockTime(10_000)
+    if not lock.lock():
+        raise OSError(f"Unable to lock settings file: {path}")
+    try:
+        yield
+    finally:
+        lock.unlock()
+
+
+class _LockedSettings(QSettings):
+    """QSettings that merges and serializes every user-setting write."""
+
+    def setValue(self, key: str, value) -> None:  # noqa: N802 - Qt API name
+        with _settings_lock(Path(self.fileName())):
+            QSettings.sync(self)
+            QSettings.setValue(self, key, value)
+            QSettings.sync(self)
+
+    def sync(self) -> None:  # noqa: N802 - Qt API name
+        with _settings_lock(Path(self.fileName())):
+            QSettings.sync(self)
+
+
+def _canonical_setting_key(key: str) -> str:
+    """Use the app's lower-case group names when repairing an INI file."""
+    group, separator, name = key.partition("/")
+    if not separator:
+        return key
+    known_groups = {default_key.partition("/")[0] for default_key in DEFAULTS}
+    if group.casefold() in known_groups:
+        group = group.casefold()
+    return f"{group}{separator}{name}"
+
+
+def _has_duplicate_sections(path: Path) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    sections: set[str] = set()
+    for line in lines:
+        if not (line.startswith("[") and line.endswith("]")):
+            continue
+        section = line[1:-1]
+        # QSettings escapes its special General section as %General.
+        section = section.removeprefix("%").casefold()
+        if section in sections:
+            return True
+        sections.add(section)
+    return False
+
+
+def _repair_settings(settings: QSettings, path: Path) -> None:
+    """Repair duplicate/case-shifted INI sections without dropping values.
+
+    Multiple app instances can race while replacing an INI file. Qt then
+    leaves duplicate sections behind; the next reader exposes their group as
+    ``General`` instead of the lower-case ``general`` keys Keeps requests,
+    which makes all those settings appear to have reverted to defaults.
+    """
+    keys = settings.allKeys()
+    canonical = [_canonical_setting_key(key) for key in keys]
+    if not _has_duplicate_sections(path) and all(
+        key == value for key, value in zip(keys, canonical)
+    ):
+        return
+
+    values = {_canonical_setting_key(key): settings.value(key) for key in keys}
+    QSettings.clear(settings)
+    for key, value in values.items():
+        QSettings.setValue(settings, key, value)
+    QSettings.sync(settings)
+
 
 def settings_path() -> Path:
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -74,7 +157,14 @@ def default_db_path() -> Path:
 
 
 def open_settings() -> QSettings:
-    return QSettings(str(settings_path()), QSettings.Format.IniFormat)
+    path = settings_path()
+    settings = _SETTINGS_CACHE.get(path)
+    if settings is None:
+        with _settings_lock(path):
+            settings = _LockedSettings(str(path), QSettings.Format.IniFormat)
+            _repair_settings(settings, path)
+        _SETTINGS_CACHE[path] = settings
+    return settings
 
 
 def get(settings: QSettings, key: str):
