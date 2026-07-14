@@ -31,8 +31,11 @@ cp -aL "$PYROOT" "$APPDIR/usr/python312"
     --format requirements.txt \
     --no-emit-project \
     --output-file "$BUILD_TMP/requirements.txt" >/dev/null)
-uv pip sync --python "$PYTHON" --system "$BUILD_TMP/requirements.txt"
-uv pip install --python "$PYTHON" --system --no-deps "$ROOT"
+# The copied interpreter can carry PEP 668's EXTERNALLY-MANAGED marker from
+# the CI runner. It is intentionally the private interpreter inside AppDir,
+# so allow uv to install the bundled application into it.
+uv pip sync --python "$PYTHON" --system --break-system-packages "$BUILD_TMP/requirements.txt"
+uv pip install --python "$PYTHON" --system --break-system-packages --no-deps "$ROOT"
 "$PYTHON" -c "import keeps, PySide6, onnxruntime, cv2, numpy, tokenizers; print('all dependencies import from the AppDir copy')"
 
 cat > "$APPDIR/AppRun" <<'EOF'
