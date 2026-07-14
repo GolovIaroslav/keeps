@@ -61,5 +61,12 @@ if [ -z "$TOOL" ]; then
 fi
 printf '%s  %s\n' "$APPIMAGETOOL_SHA256" "$TOOL" | sha256sum --check --status
 
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" "$OUTPUT"
+# mksquashfs defaults to one thread per core; against a ~1GB AppDir that can
+# starve a busy desktop machine (observed locally: silent build death under
+# load). Set MKSQUASHFS_PROCESSORS=2 for local builds; CI runs unthrottled.
+TOOL_ARGS=()
+if [ -n "${MKSQUASHFS_PROCESSORS:-}" ]; then
+    TOOL_ARGS+=(--mksquashfs-opt -processors --mksquashfs-opt "$MKSQUASHFS_PROCESSORS")
+fi
+ARCH=x86_64 "$TOOL" --appimage-extract-and-run "${TOOL_ARGS[@]}" "$APPDIR" "$OUTPUT"
 printf 'created %s\n' "$OUTPUT"
