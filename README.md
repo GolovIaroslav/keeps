@@ -21,9 +21,11 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 
 ## Install
 
-### AppImage (any distro)
+### AppImage (64-bit desktop Linux)
 
-Download the latest `keeps-*-x86_64.AppImage` from [Releases](https://github.com/GolovIaroslav/keeps/releases), `chmod +x` it, and run. Still needs `wl-clipboard` (Wayland) and, optionally, `ydotool` for auto-paste from the host system — see `keeps status` after first run.
+Download the latest `keeps-*-x86_64.AppImage` from [Releases](https://github.com/GolovIaroslav/keeps/releases), `chmod +x` it, and run. It contains its Python runtime and Python packages, so it does not require a host Python installation. It supports x86_64 Linux desktop sessions (Wayland or X11), with a working graphics driver and the normal desktop graphics stack. Still install `wl-clipboard` on Wayland and, optionally, `ydotool` for auto-paste from the host system — see `keeps status` after first run.
+
+Most distributions run AppImages directly. If a minimal or older system reports that FUSE is unavailable, run it without FUSE using `APPIMAGE_EXTRACT_AND_RUN=1 ./keeps-*-x86_64.AppImage` (or install the distribution's FUSE 2 compatibility package). A headless machine, an unsupported CPU architecture, or a system older than the glibc baseline of the build image is outside the AppImage's supported environment.
 
 To update, quit Keeps and replace only the AppImage. User settings stay in
 `~/.config/keeps/keeps.ini` and clipboard history in `~/.local/share/keeps/keeps.db`
