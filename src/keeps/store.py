@@ -190,12 +190,39 @@ def _canonical_bytes(kind: str, mime_data: dict[str, bytes]) -> bytes:
     if kind == "text":
         return mime_data["text/plain"]
     if kind == "image":
-        return mime_data["image/png"]
+        return _png_without_nonvisual_metadata(mime_data["image/png"])
     if kind == "files":
         return mime_data["text/uri-list"]
     if kind == "html":
         return mime_data.get("text/plain", mime_data.get("text/html", b""))
     raise ValueError(f"unknown kind: {kind}")
+
+
+def _png_without_nonvisual_metadata(data: bytes) -> bytes:
+    """Strip PNG text/timestamp chunks for image deduplication.
+
+    Screenshot tools can publish an identical image twice while changing only
+    textual metadata. Keep all colour and pixel-affecting chunks intact; an
+    invalid PNG deliberately falls back to its original bytes.
+    """
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        return data
+
+    result = bytearray(signature)
+    position = len(signature)
+    while position < len(data):
+        if position + 12 > len(data):
+            return data
+        length = struct.unpack(">I", data[position : position + 4])[0]
+        end = position + 12 + length
+        if end > len(data):
+            return data
+        chunk_type = data[position + 4 : position + 8]
+        if chunk_type not in {b"tEXt", b"zTXt", b"iTXt", b"tIME"}:
+            result.extend(data[position:end])
+        position = end
+    return bytes(result)
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:

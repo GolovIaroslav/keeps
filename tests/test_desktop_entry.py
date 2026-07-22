@@ -20,6 +20,18 @@ def test_ensure_installed_is_idempotent(tmp_path):
     assert applications_path(tmp_path).stat().st_mtime_ns == first_mtime
 
 
+def test_ensure_installed_preserves_a_live_appimage_launcher(tmp_path):
+    image = tmp_path / "keeps.AppImage"
+    image.touch()
+    path = applications_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(f"[Desktop Entry]\nExec=env APPIMAGELAUNCHER_DISABLE=1 {image}\n")
+
+    ensure_installed(tmp_path)
+
+    assert f"Exec=env APPIMAGELAUNCHER_DISABLE=1 {image}" in path.read_text()
+
+
 @pytest.mark.parametrize(
     ("environ", "on_path", "argv0_is_real_script", "expected"),
     [

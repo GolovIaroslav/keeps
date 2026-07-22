@@ -11,7 +11,9 @@ permissions:
 
 jobs:
   appimage:
-    runs-on: ubuntu-latest
+    # Build on the oldest supported Ubuntu baseline so bundled libraries also
+    # run on newer distributions.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -21,8 +23,14 @@ jobs:
       - name: Install portable Python 3.12
         run: uv python install 3.12
 
-      - name: Install Breeze icon theme (for the bundled app icon)
-        run: sudo apt-get update && sudo apt-get install -y breeze-icon-theme
+      - name: Install AppImage build/runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            breeze-icon-theme \
+            libegl1 libglib2.0-0 libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfreetype6 libzstd1 libpcre2-8-0 libx11-6 \
+            libwayland-client0 libwayland-cursor0 libxcb1
 
       - name: Build AppImage
         run: |

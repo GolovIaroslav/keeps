@@ -81,7 +81,25 @@ def applications_path(data_home: Path | None = None) -> Path:
 def ensure_installed(data_home: Path | None = None) -> None:
     entry = render_desktop_entry()
     path = applications_path(data_home)
-    if path.exists() and path.read_text() == entry:
-        return
+    if path.exists():
+        existing = path.read_text()
+        if existing == entry or _has_live_appimage_command(existing):
+            return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(entry)
+
+
+def _has_live_appimage_command(entry: str) -> bool:
+    """Keep a working AppImage launcher when runtime metadata is unavailable.
+
+    AppImageLauncher can execute AppRun without setting ``APPIMAGE``.  In that
+    case ``launch_command()`` cannot rediscover the image and would otherwise
+    replace its own valid absolute Exec= line with the unusable bare ``keeps``.
+    """
+    for line in entry.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        command = line.removeprefix("Exec=")
+        image = command.rsplit(" ", 1)[-1]
+        return image.endswith(".AppImage") and Path(image).is_file()
+    return False
