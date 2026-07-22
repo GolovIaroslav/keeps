@@ -1,5 +1,7 @@
 import sqlite3
+import struct
 import time
+import zlib
 
 import pytest
 
@@ -21,6 +23,21 @@ PNG_1X1 = bytes.fromhex(
     "3df40000000c4944415478da6360606000000004000160b3e1b40000000049"
     "454e44ae426082"
 )
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _with_png_itxt(png: bytes, text: bytes) -> bytes:
+    """Add a non-visual iTXt chunk just before IEND."""
+    iend = png.rfind(b"IEND") - 4
+    return png[:iend] + _png_chunk(b"iTXt", text) + png[iend:]
 
 
 @pytest.fixture
@@ -46,6 +63,14 @@ def test_roundtrip_image(store):
     clip_id = store.add("image", mime_data)
     assert store.get_data(clip_id)["image/png"] == PNG_1X1
     assert store.all()[0].preview == "[image 1x1]"
+
+
+def test_image_dedup_ignores_nonvisual_png_metadata(store):
+    first = store.add("image", {"image/png": _with_png_itxt(PNG_1X1, b"first")})
+    duplicate = store.add("image", {"image/png": PNG_1X1})
+
+    assert duplicate == first
+    assert len(store.all()) == 1
 
 
 def test_copy_buffers_are_persistent_and_do_not_touch_history(tmp_path):
