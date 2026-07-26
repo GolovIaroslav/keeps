@@ -259,6 +259,10 @@ class Store:
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # A clip capture is an independent transaction. In WAL mode NORMAL
+        # keeps commits fast while preserving database consistency; at most
+        # the most recent transactions can be lost on a sudden power failure.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
