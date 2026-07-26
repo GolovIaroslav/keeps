@@ -57,12 +57,14 @@ class X11Watcher(QObject):
     def cancel_buffer_capture(self) -> None:
         self._buffer_capture = None
 
+    def mark_self_set(self) -> None:
+        """Ignore the next programmatic clipboard write made by Keeps."""
+        self.guard.mark_self_set()
+
     def _on_changed(self) -> None:
-        # Our own clipboard write (popup paste/copy) also fires dataChanged;
-        # the clip is already in the store, nothing to capture. (No deadlock
-        # risk here, unlike Wayland -- QClipboard reads in-process -- just a
-        # pointless re-capture of our own data.)
-        if self._clipboard.ownsClipboard():
+        # Popup/copy-buffer writes mark this one event. A manual Ctrl+C in a
+        # Keeps dialog is also owned by this process, but must be captured.
+        if self.guard.consume_skip():
             return
         self._mime_data = self._clipboard.mimeData()
         available = self._available_types()

@@ -145,7 +145,7 @@ def _run_daemon(show_immediately: bool) -> int:
     from PySide6.QtNetwork import QLocalServer
     from PySide6.QtWidgets import QApplication
 
-    from keeps import desktop_entry
+    from keeps import autostart, desktop_entry
     from keeps.ai.runtime import AiRuntime
     from keeps.copy_buffers import CopyBufferController
     from keeps.hotkey.buffers import CopyBufferHotkeyManager
@@ -157,6 +157,7 @@ def _run_daemon(show_immediately: bool) -> int:
     from keeps.ui.tray import TrayIcon
 
     desktop_entry.ensure_installed()
+    autostart.refresh_if_enabled()
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("Keeps")
@@ -187,6 +188,7 @@ def _run_daemon(show_immediately: bool) -> int:
         ai_runtime.run_text_embed_backlog_sweep()
 
     popup = PopupWindow(store, ai_runtime)
+    popup.programmatic_clipboard_set.connect(watcher.mark_self_set)
     thumbnail_runtime.thumbnail_ready.connect(popup.on_thumbnail_ready)
     popup.thumbnail_requested.connect(thumbnail_runtime.on_clip_captured)
     watcher.clip_added.connect(popup.on_clip_captured)

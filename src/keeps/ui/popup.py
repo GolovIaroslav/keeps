@@ -345,6 +345,7 @@ class PopupWindow(QWidget):
     # copies without emitting this.
     paste_requested = Signal(int, bool)  # (clip_id, plain_only)
     thumbnail_requested = Signal(int, str)  # (clip_id, kind), after an image edit
+    programmatic_clipboard_set = Signal()
 
     def __init__(
         self,
@@ -1445,8 +1446,8 @@ class PopupWindow(QWidget):
             self.model.mark_pasted(clip_id)
             self.paste_requested.emit(clip_id, plain_only)
 
-    @staticmethod
-    def _set_clipboard(mime_data: dict[str, bytes], plain_only: bool) -> None:
+    def _set_clipboard(self, mime_data: dict[str, bytes], plain_only: bool) -> None:
+        self.programmatic_clipboard_set.emit()
         QGuiApplication.clipboard().setMimeData(make_mime_data(mime_data, plain_only=plain_only))
 
     def _hide_before_paste(self, *, restore_persistent: bool) -> None:

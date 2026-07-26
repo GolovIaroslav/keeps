@@ -71,16 +71,25 @@ class WaylandWatcher(QObject):
     def cancel_buffer_capture(self) -> None:
         self._buffer_capture = None
 
+    def mark_self_set(self) -> None:
+        """Ignore the next programmatic clipboard write made by Keeps."""
+        self.guard.mark_self_set()
+
     def _on_triggered(self) -> None:
         self._process.readAllStandardOutput()
-        # Our own clipboard write (popup paste/copy) also fires --watch. Reading
-        # it back would deadlock: wl-paste asks the owner (us) for the data, but
-        # the owner's main thread is the one blocked inside that very wl-paste
-        # call. The clip is already in the store (touch()ed on activation), so
-        # there is nothing to capture anyway.
-        if QGuiApplication.clipboard().ownsClipboard():
+        # Programmatic popup/copy-buffer writes are already represented in the
+        # store. Consume this before testing ownership, otherwise the guard
+        # would leak and discard a later manual Ctrl+C.
+        if self.guard.consume_skip():
             return
-        result = self._capture_bundle()
+        if QGuiApplication.clipboard().ownsClipboard():
+            # Ctrl+C in a Keeps View/Edit dialog also makes this process the
+            # owner. Do not ask wl-paste to read it: it would block the main
+            # thread that must serve our own selection. Qt can provide it
+            # directly, without the Wayland round trip.
+            result = self._capture_own_bundle()
+        else:
+            result = self._capture_bundle()
         if result is None:
             return
         callback = self._buffer_capture
@@ -88,9 +97,20 @@ class WaylandWatcher(QObject):
             self._buffer_capture = None
             callback(*result)
             return
-        if self.guard.consume_skip():
-            return
         self._store_bundle(*result)
+
+    def _capture_own_bundle(self) -> tuple[str, dict[str, bytes]] | None:
+        mime_data = QGuiApplication.clipboard().mimeData()
+        if mime_data is None:
+            return None
+        available = set(mime_data.formats())
+        settings = config.open_settings()
+        return build_bundle(
+            available,
+            lambda mime: bytes(mime_data.data(mime)),
+            self._max_item_mb,
+            store_all_formats=bool(config.get(settings, "capture/store_all_formats")),
+        )
 
     def _capture_bundle(self) -> tuple[str, dict[str, bytes]] | None:
         available = self._list_types()
