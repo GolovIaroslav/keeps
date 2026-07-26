@@ -11,6 +11,7 @@ from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QPlainTextEdit, QVBoxLayout
 
 from keeps.store import Clip
+from keeps.ui.format import format_byte_size, text_statistics
 
 _DEFAULT_SIZE = QSize(480, 400)
 
@@ -32,6 +33,11 @@ class ViewDialog(QDialog):
         self.setWindowTitle(self.tr("View"))
         layout = QVBoxLayout(self)
 
+        details = QLabel(self._details_text(clip, mime_data))
+        details.setWordWrap(True)
+        details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(details)
+
         if clip.kind == "image":
             layout.addWidget(self._build_image_label(mime_data))
             if clip.ocr_text and clip.ocr_text.strip():
@@ -49,6 +55,34 @@ class ViewDialog(QDialog):
         layout.addWidget(buttons)
 
         self.resize(_DEFAULT_SIZE)
+
+    def _details_text(self, clip: Clip, mime_data: dict[str, bytes]) -> str:
+        total_size = format_byte_size(sum(len(data) for data in mime_data.values()))
+        if clip.kind in {"text", "html"}:
+            stats = text_statistics(_clip_text(clip, mime_data))
+            return self.tr(
+                "{words} words · {characters} characters ({without_spaces} without spaces)"
+                " · {lines} lines · {paragraphs} paragraphs · {size}"
+            ).format(
+                words=stats.words,
+                characters=stats.characters,
+                without_spaces=stats.characters_without_whitespace,
+                lines=stats.lines,
+                paragraphs=stats.paragraphs,
+                size=total_size,
+            )
+        if clip.kind == "files":
+            count = len([line for line in mime_data.get("text/uri-list", b"").splitlines() if line])
+            return self.tr("{count} files · {size}").format(count=count, size=total_size)
+        image = QImage.fromData(mime_data.get("image/png", b""), "PNG")
+        dimensions = (
+            self.tr("{width} × {height} px").format(width=image.width(), height=image.height())
+            if not image.isNull()
+            else self.tr("Unknown dimensions")
+        )
+        return self.tr("Image · {dimensions} · {size}").format(
+            dimensions=dimensions, size=total_size
+        )
 
     @staticmethod
     def _build_text_view(clip: Clip, mime_data: dict[str, bytes]) -> QPlainTextEdit:
