@@ -1,4 +1,9 @@
-from keeps.autostart import autostart_path, is_autostart_enabled, set_autostart_enabled
+from keeps.autostart import (
+    autostart_path,
+    is_autostart_enabled,
+    refresh_if_enabled,
+    set_autostart_enabled,
+)
 from keeps.desktop_entry import launch_command
 
 
@@ -22,4 +27,19 @@ def test_disable_removes_desktop_file(tmp_path):
 
 def test_disable_when_never_enabled_is_a_noop(tmp_path):
     set_autostart_enabled(False, tmp_path)
+    assert is_autostart_enabled(tmp_path) is False
+
+
+def test_refresh_rewrites_stale_exec_command(tmp_path):
+    set_autostart_enabled(True, tmp_path)
+    path = autostart_path(tmp_path)
+    path.write_text(path.read_text().replace(launch_command(), "/old/stale/keeps.AppImage"))
+
+    refresh_if_enabled(tmp_path)
+
+    assert f"Exec={launch_command()}" in path.read_text()
+
+
+def test_refresh_when_disabled_is_a_noop(tmp_path):
+    refresh_if_enabled(tmp_path)
     assert is_autostart_enabled(tmp_path) is False

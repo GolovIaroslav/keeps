@@ -60,7 +60,10 @@ def launch_command(
     env = os.environ if environ is None else environ
     appimage = env.get("APPIMAGE")
     if appimage:
-        return appimage
+        # AppImageLauncher otherwise puts its integration dialog in front of
+        # the daemon on every desktop/autostart launch. Keeps owns its single
+        # stable desktop entry and update path, so bypass that prompt.
+        return f"env APPIMAGELAUNCHER_DISABLE=1 {appimage}"
     candidate = Path(argv0 if argv0 is not None else sys.argv[0])
     if candidate.name == "keeps" and candidate.is_file():
         return str(candidate.resolve())

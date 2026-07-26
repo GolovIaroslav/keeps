@@ -40,7 +40,7 @@ def test_ensure_installed_preserves_a_live_appimage_launcher(tmp_path):
             {"APPIMAGE": "/home/u/Applications/keeps.AppImage"},
             True,
             True,
-            "/home/u/Applications/keeps.AppImage",
+            "env APPIMAGELAUNCHER_DISABLE=1 /home/u/Applications/keeps.AppImage",
         ),
         # On PATH (distro package): a bare name keeps the entry relocatable.
         ({}, True, False, "keeps"),
