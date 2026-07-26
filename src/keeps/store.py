@@ -793,7 +793,24 @@ class Store:
         if not query.strip():
             return self.all(), {}
         reasons = self._search_index.search(query)
-        return [clip for clip in self.all() if clip.id in reasons], reasons
+        if not reasons:
+            return [], reasons
+
+        # SQLite limits bound parameters (commonly to 999), so fetch matching
+        # rows in safe batches.  Hydrating the whole history here made an exact
+        # search unnecessarily slow once a user had thousands of clips.
+        rows: list[sqlite3.Row] = []
+        clip_ids = list(reasons)
+        for start in range(0, len(clip_ids), 900):
+            batch = clip_ids[start : start + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows.extend(
+                self._conn.execute(
+                    f"SELECT * FROM clips WHERE id IN ({placeholders})", batch
+                ).fetchall()
+            )
+        rows.sort(key=lambda row: (row["last_used_at"], row["id"]), reverse=True)
+        return [self._row_to_clip(row) for row in rows], reasons
 
     def search_snippet(
         self, clip_id: int, query: str, reason: MatchReason

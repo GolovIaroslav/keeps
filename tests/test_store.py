@@ -224,6 +224,16 @@ def test_search_uses_full_content_and_reports_match_reason(store):
     assert reasons == {clip_id: MatchReason.EXACT}
 
 
+def test_search_keeps_history_order_without_hydrating_non_matches(store):
+    older = store.add("text", {"text/plain": b"needle older"})
+    store.add("text", {"text/plain": b"unrelated"})
+    newer = store.add("text", {"text/plain": b"needle newer"})
+
+    results = store.search("needle")
+
+    assert [clip.id for clip in results] == [newer, older]
+
+
 def test_search_index_tracks_content_updates_and_deletion(store):
     clip_id = store.add("text", {"text/plain": b"before"})
 
