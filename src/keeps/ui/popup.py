@@ -772,6 +772,14 @@ class PopupWindow(QWidget):
         if event.type() == QEvent.Type.Wheel and self._handle_wheel(event):
             return True
         if obj is self.search_edit and event.type() == QEvent.Type.KeyPress:
+            # Text fields keep the platform-standard Ctrl+A behavior. The
+            # popup's Select all action remains available when the list owns
+            # focus, where it selects all visible clips.
+            if (
+                event.key() == Qt.Key.Key_A
+                and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+            ):
+                return False
             return self._handle_key(event)
         if obj is self.list_view and event.type() == QEvent.Type.KeyPress:
             if event.key() in set(_NAVIGATION_KEYS.values()):

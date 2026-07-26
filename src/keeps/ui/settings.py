@@ -70,7 +70,7 @@ HOTKEYS_HTML = """\
 <tr><td>typing text</td><td>filter the list live</td></tr>
 <tr><td>&uarr;/&darr;, PgUp/PgDn</td>
     <td>navigate (from the search field, arrows move the list)</td></tr>
-<tr><td>Ctrl+A</td><td>select all visible search results</td></tr>
+<tr><td>Ctrl+A</td><td>select search text, or all visible results from the list</td></tr>
 <tr><td>Enter / double-click</td>
     <td>paste the selected item; multiple items are joined as plain text</td></tr>
 <tr><td>Shift+Enter</td><td>paste as plain text (also used for multiple items)</td></tr>
