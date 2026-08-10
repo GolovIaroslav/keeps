@@ -25,6 +25,25 @@ OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facin
 AI_TASK_MAX_THREADS = 1  # bound OCR/RAG working memory; model inference is CPU-heavy
 
 
+def _release_unused_heap_memory() -> None:
+    """Return freed native inference arenas to Linux after model unload.
+
+    ONNX Runtime, OpenCV, and OpenBLAS allocate from several glibc arenas.
+    Dropping their Python session objects frees those allocations, but glibc
+    can retain the pages indefinitely in a long-lived daemon. ``malloc_trim``
+    releases those already-free pages without touching live allocations.
+    """
+    try:
+        import ctypes
+
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        return
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    malloc_trim(0)
+
+
 class _QuerySignals(QObject):
     # `object`, not `dict`: PySide6 marshals a `dict`-typed signal argument as
     # a C++ QVariantMap (string keys only) for the queued cross-thread
@@ -216,10 +235,15 @@ class AiRuntime(QObject):
         idle = time.monotonic() - self._last_activity
         if idle < minutes * 60:
             return
+        unloaded = False
         if self._text_embedder is not None and self._text_embedder.is_loaded:
             self._text_embedder.unload()
+            unloaded = True
         if self._ocr_engine is not None and self._ocr_engine.is_loaded:
             self.reset_ocr_engine()
+            unloaded = True
+        if unloaded:
+            _release_unused_heap_memory()
 
     # -- text embedder lifecycle (Model management) -------------------------
 

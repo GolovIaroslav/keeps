@@ -461,6 +461,23 @@ def test_idle_unload_checks_both_models_in_one_pass(qapp, store, settings):
     assert fake_ocr.unloaded is True
 
 
+def test_idle_unload_releases_native_heap_after_models_unload(
+    qapp, store, settings, monkeypatch
+):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    runtime._text_embedder = FakeEmbedder()
+    runtime._last_activity = time.monotonic() - 120
+    released = []
+    monkeypatch.setattr(
+        "keeps.ai.runtime._release_unused_heap_memory", lambda: released.append(True)
+    )
+
+    runtime._check_idle_unload()
+
+    assert released == [True]
+
+
 def test_idle_unload_waits_for_active_ai_work(qapp, store, settings):
     settings.setValue("ai/model_idle_unload_minutes", 1)
     runtime = _make_runtime(store, settings)
