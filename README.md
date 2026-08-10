@@ -2,7 +2,7 @@
 
 A [Ditto](https://github.com/sabrogden/Ditto)-inspired clipboard manager for Linux. Wayland-first, KDE-first, light and fast.
 
-> **Status: v0.3.1.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, workbench, persistent copy buffers, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
+> **Status: v0.3.2.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, workbench, persistent copy buffers, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
 
 ## Why
 
