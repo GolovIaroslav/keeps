@@ -1,6 +1,6 @@
 # Maintainer: Keeps contributors
 pkgname=keeps
-pkgver=0.3.2
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Ditto-inspired clipboard manager for Linux'
 arch=('any')
@@ -18,7 +18,7 @@ optdepends=(
   'python-tokenizers: semantic text search'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/GolovIaroslav/keeps/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('5a0c690aeab3088adf2cb84671766c5382097e833231941c918343214c649a44')
+sha256sums=('24c8e376e990fd65d30bcef2996559603dcce6e83d10fcb9d4881dacd6d0205a')
 
 build() {
   cd "$pkgname-$pkgver"
