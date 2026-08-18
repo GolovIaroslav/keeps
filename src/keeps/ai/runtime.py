@@ -375,15 +375,24 @@ class AiRuntime(QObject):
             self._process_clip_text_embed(clip_id)
         if kind != "image" or not self.ocr_enabled:
             return
+        if not self._store.clip_needs_ocr(clip_id):
+            return
         timing = self.ocr_timing
         if timing == "immediate":
             self._process_clip_ocr(clip_id)
         elif timing == "delayed":
+            if clip_id in self._pending_delayed_clip_ids:
+                return
             self._pending_delayed_clip_ids.add(clip_id)
             self._delay_timer.start(int(self.ocr_delay_seconds * 1000))
         # "scheduled": nothing to do here -- the periodic sweep picks it up.
 
     def _process_clip_text_embed(self, clip_id: int) -> None:
+        task_key = ("text", clip_id)
+        if task_key in self._pending_ai_tasks or not self._store.clip_needs_embedding(
+            clip_id, models.TEXT_EMBED.name
+        ):
+            return
         mime_data = self._store.get_data(clip_id)
         text = mime_data.get("text/plain", b"").decode("utf-8", errors="replace")
         if not text.strip():
@@ -391,7 +400,7 @@ class AiRuntime(QObject):
         signals = _TextEmbedSignals(self)
         signals.finished.connect(self._on_text_embed_done)
         task = _TextEmbedTask(self.embed_text, clip_id, text, signals)
-        self._pending_ai_tasks.add(("text", clip_id))
+        self._pending_ai_tasks.add(task_key)
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
     def _on_text_embed_done(self, clip_id: int, vec_bytes: bytes) -> None:
@@ -427,6 +436,9 @@ class AiRuntime(QObject):
             self._process_clip_ocr(clip_id)
 
     def _process_clip_ocr(self, clip_id: int) -> None:
+        task_key = ("ocr", clip_id)
+        if task_key in self._pending_ai_tasks or not self._store.clip_needs_ocr(clip_id):
+            return
         mime_data = self._store.get_data(clip_id)
         png_bytes = mime_data.get("image/png")
         if png_bytes is None:
@@ -438,7 +450,7 @@ class AiRuntime(QObject):
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
         task = _OcrTask(engine, clip_id, png_bytes, signals, embed_fn)
-        self._pending_ai_tasks.add(("ocr", clip_id))
+        self._pending_ai_tasks.add(task_key)
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
     def _on_ocr_done(self, clip_id: int, text: str, vec_bytes: bytes | None) -> None:

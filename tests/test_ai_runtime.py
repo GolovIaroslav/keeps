@@ -144,6 +144,21 @@ def test_text_clip_gets_embedded_when_rag_enabled(qapp, store, settings):
     assert fake.calls == ["hello world"]
 
 
+def test_duplicate_text_capture_does_not_repeat_completed_embedding(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    fake = FakeEmbedder()
+    runtime._text_embedder = fake
+
+    clip_id = store.add("text", {"text/plain": b"same text"})
+    runtime.on_clip_captured(clip_id, "text")
+    assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
+
+    runtime.on_clip_captured(clip_id, "text")
+    _settle(qapp)
+
+    assert fake.calls == ["same text"]
+
+
 def test_text_clip_not_embedded_when_rag_disabled(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=False)
     runtime._text_embedder = FakeEmbedder()
@@ -182,6 +197,23 @@ def test_image_clip_ocr_immediate_sets_ocr_text(qapp, store, settings):
     assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
     clip = next(c for c in store.all() if c.id == clip_id)
     assert clip.ocr_text == "Привет мир"
+
+
+def test_duplicate_image_capture_does_not_repeat_completed_ocr(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    fake_ocr = FakeOcrEngine("recognized once")
+    runtime._ocr_engine = fake_ocr
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+
+    # Spectacle can publish the same screenshot again after Keeps has already
+    # indexed it. Store.add() returns the existing clip id in that case.
+    runtime.on_clip_captured(clip_id, "image")
+    _settle(qapp)
+
+    assert fake_ocr.calls == 1
 
 
 def test_image_clip_ignored_when_ocr_disabled(qapp, store, settings):

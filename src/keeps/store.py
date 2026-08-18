@@ -834,6 +834,22 @@ class Store:
         )
         self._conn.commit()
 
+    def clip_needs_embedding(self, clip_id: int, model: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.id = ? AND c.kind IN ('text', 'html') AND e.clip_id IS NULL",
+            (model, clip_id),
+        ).fetchone()
+        return row is not None
+
+    def clip_needs_ocr(self, clip_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips WHERE id = ? AND kind = 'image' AND ocr_text IS NULL",
+            (clip_id,),
+        ).fetchone()
+        return row is not None
+
     def get_all_embeddings(self, model: str) -> list[tuple[int, bytes]]:
         rows = self._conn.execute(
             "SELECT clip_id, vec FROM embeddings WHERE model = ?", (model,)
