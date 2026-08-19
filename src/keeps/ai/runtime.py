@@ -62,17 +62,24 @@ class _EncodeQueryTask(QRunnable):
     beforehand.
     """
 
-    def __init__(self, embedder, query: str, signals: _QuerySignals, clip_ids_and_vecs) -> None:
+    def __init__(
+        self, embedder, query: str, signals: _QuerySignals, clip_ids_and_vecs, is_current
+    ) -> None:
         super().__init__()
         self._embedder = embedder
         self._query = query
         self._signals = signals
         self._clip_ids_and_vecs = clip_ids_and_vecs
+        self._is_current = is_current
 
     def run(self) -> None:
+        if not self._is_current():
+            return
         import numpy as np
 
         query_vec = self._embedder.encode(self._query)
+        if not self._is_current():
+            return
         scores = {}
         for clip_id, vec_bytes in self._clip_ids_and_vecs:
             vec = np.frombuffer(vec_bytes, dtype=np.float32)
@@ -157,6 +164,8 @@ class AiRuntime(QObject):
     app.py::_run_daemon), shared by PopupWindow (search) and SettingsDialog
     (Model management).
     """
+
+    semantic_index_changed = Signal()
 
     def __init__(self, store: Store, settings, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -303,14 +312,26 @@ class AiRuntime(QObject):
         query text is echoed back so callers can discard stale results from
         a since-superseded search.
         """
-        if not query.strip():
+        if not query.strip() or not self.semantic_search_enabled:
             on_done(query, {})
             return
         embedder = self._get_text_embedder()
         clip_ids_and_vecs = self._store.get_all_embeddings(models.TEXT_EMBED.name)
         signals = _QuerySignals(self)
         signals.finished.connect(on_done)
-        self._ai_pool.start(_EncodeQueryTask(embedder, query, signals, clip_ids_and_vecs))
+        generation = self._semantic_generation
+        self._ai_pool.start(
+            _EncodeQueryTask(
+                embedder,
+                query,
+                signals,
+                clip_ids_and_vecs,
+                lambda: (
+                    self._semantic_generation == generation
+                    and self._search_mode != SearchMode.KEYWORD
+                ),
+            )
+        )
         self._touch_activity()
 
     def embed_text(self, text: str) -> bytes:
@@ -440,6 +461,8 @@ class AiRuntime(QObject):
         self._pending_ai_tasks.discard(("text", clip_id))
         if vec_bytes is not None:
             self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+            if not any(kind == "text" for kind, _clip_id in self._pending_ai_tasks):
+                self.semantic_index_changed.emit()
         elif self.semantic_search_enabled:
             self._process_clip_text_embed(clip_id)
 

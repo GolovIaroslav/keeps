@@ -392,6 +392,37 @@ def test_returning_to_keyword_cancels_queued_semantic_backlog(qapp, store, setti
     assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
 
 
+def test_returning_to_keyword_cancels_inflight_semantic_query(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    callbacks = []
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    runtime.encode_query_async("needle", lambda *result: callbacks.append(result))
+    assert blocker.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.KEYWORD)
+    blocker.release.set()
+    _settle(qapp)
+
+    assert blocker.calls == ["needle"]
+    assert callbacks == []
+
+
+def test_completed_backlog_emits_one_semantic_index_change(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    runtime._text_embedder = FakeEmbedder()
+    for index in range(3):
+        store.add("text", {"text/plain": f"clip {index}".encode()})
+    changes = []
+    runtime.semantic_index_changed.connect(lambda: changes.append(True))
+
+    runtime.set_search_mode(SearchMode.BLENDED)
+
+    assert _pump_until(qapp, lambda: len(changes) == 1)
+    assert len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 3
+
+
 def test_ocr_finishing_after_semantic_activation_gets_embedded(qapp, store, settings):
     runtime = _make_runtime(
         store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
@@ -461,6 +492,7 @@ def test_encode_query_async_delivers_nonempty_scores_across_thread_boundary(qapp
     runtime = _make_runtime(store, settings, rag_text=True)
     fake = FakeEmbedder()
     runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.SEMANTIC)
 
     clip_id = store.add("text", {"text/plain": b"hello world"})
     vec_bytes = fake.encode("hello world").astype("float32").tobytes()

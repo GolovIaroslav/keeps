@@ -182,6 +182,12 @@ class ClipListModel(QAbstractListModel):
         # self._clips and is looked up by id, never by row index.
         self._pasted_ids: set[int] = set()
         self._scope = "history"
+        if self._ai_runtime is not None and hasattr(
+            self._ai_runtime, "semantic_index_changed"
+        ):
+            self._ai_runtime.semantic_index_changed.connect(
+                self.refresh_semantic_scores
+            )
 
     @property
     def pasted_ids(self) -> frozenset[int]:
@@ -204,13 +210,18 @@ class ClipListModel(QAbstractListModel):
         self._current_query = query
         self._semantic_scores = {}
         self._rebuild()
+        self.refresh_semantic_scores()
+
+    def refresh_semantic_scores(self) -> None:
         if (
             self._ai_runtime is not None
             and self._ai_runtime.rag_text_enabled
             and self._ai_runtime.search_mode != ranking.SearchMode.KEYWORD
-            and query.strip()
+            and self._current_query.strip()
         ):
-            self._ai_runtime.encode_query_async(query, self._on_semantic_scores)
+            self._ai_runtime.encode_query_async(
+                self._current_query, self._on_semantic_scores
+            )
 
     def set_scope(self, scope: str) -> None:
         self._scope = scope

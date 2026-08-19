@@ -29,23 +29,46 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from keeps.store import Clip, normalize, normalize_with_mapping
+from keeps.store import Clip, normalize
 from keeps.ui.format import format_byte_size, text_statistics
 
 _DEFAULT_SIZE = QSize(480, 400)
+_FIND_MATCH_LIMIT = 10_000
+
+
+def _codepoint_offset(text: str, normalized_offset: int) -> int:
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high) // 2
+        if len(normalize(text[: middle + 1])) > normalized_offset:
+            high = middle
+        else:
+            low = middle + 1
+    return low
 
 
 def _match_spans(text: str, query: str) -> list[tuple[int, int]]:
     """Return non-overlapping matches using the popup's Unicode normalization."""
-    normalized_text, original_indexes = normalize_with_mapping(text)
+    normalized_text = normalize(text)
     normalized_query = normalize(query)
     if not normalized_query:
         return []
     spans = []
     offset = 0
-    while (position := normalized_text.find(normalized_query, offset)) >= 0:
+    identity_mapping = len(normalized_text) == len(text)
+    while (
+        len(spans) < _FIND_MATCH_LIMIT
+        and (position := normalized_text.find(normalized_query, offset)) >= 0
+    ):
         end_position = position + len(normalized_query) - 1
-        span = (original_indexes[position], original_indexes[end_position] + 1)
+        span = (
+            (position, end_position + 1)
+            if identity_mapping
+            else (
+                _codepoint_offset(text, position),
+                _codepoint_offset(text, end_position) + 1,
+            )
+        )
         if not spans or spans[-1] != span:
             spans.append(span)
         offset = position + len(normalized_query)
@@ -64,6 +87,7 @@ class _FindBar(QWidget):
         self._editor = editor
         self._matches: list[tuple[int, int]] = []
         self._current_match = -1
+        self._matches_truncated = False
         self._query = QLineEdit(self)
         self._query.setPlaceholderText(self.tr("Find in clip..."))
         self._counter = QLabel("0 / 0", self)
@@ -109,6 +133,8 @@ class _FindBar(QWidget):
 
     def _find_first(self) -> None:
         self._matches = _match_spans(self._editor.toPlainText(), self._query.text())
+        total = normalize(self._editor.toPlainText()).count(normalize(self._query.text()))
+        self._matches_truncated = total > len(self._matches)
         self._current_match = 0 if self._matches else -1
         self._select_current_match()
 
@@ -146,7 +172,10 @@ class _FindBar(QWidget):
         highlight.format.setForeground(QColor("#171717"))
         self._editor.setExtraSelections([highlight])
 
-        self._counter.setText(f"{self._current_match + 1} / {len(self._matches)}")
+        suffix = "+" if self._matches_truncated else ""
+        self._counter.setText(
+            f"{self._current_match + 1} / {len(self._matches)}{suffix}"
+        )
 
 
 def _clip_text(clip: Clip, mime_data: dict[str, bytes]) -> str:

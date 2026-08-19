@@ -14,6 +14,12 @@ def test_qt_cursor_offset_counts_astral_characters_as_utf16():
     assert _utf16_offset("😀 needle", 2) == 3
 
 
+def test_find_spans_bound_memory_for_extremely_common_queries():
+    spans = _match_spans("a" * 20_000, "a")
+
+    assert len(spans) == 10_000
+
+
 def test_edit_dialog_find_bar_seeds_navigates_and_closes():
     script = r'''
 from PySide6.QtWidgets import QApplication
@@ -72,6 +78,55 @@ assert calls == []
 runtime.search_mode = SearchMode.SEMANTIC
 model.set_query("needle")
 assert calls == ["needle"]
+store.close()
+'''
+    environment = os.environ | {
+        "QT_QPA_PLATFORM": "offscreen",
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_completed_semantic_index_retries_the_active_query(tmp_path):
+    script = r'''
+from pathlib import Path
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QApplication
+from keeps.ai.ranking import SearchMode
+from keeps.store import Store
+from keeps.ui.popup import ClipListModel
+
+class Runtime(QObject):
+    semantic_index_changed = Signal()
+    rag_text_enabled = True
+    ocr_enabled = False
+    search_mode = SearchMode.SEMANTIC
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def encode_query_async(self, query, callback):
+        self.calls.append(query)
+
+app = QApplication([])
+store = Store(Path("store.db"))
+store.add("text", {"text/plain": b"needle"})
+runtime = Runtime()
+model = ClipListModel(store, runtime)
+model.set_query("needle")
+assert runtime.calls == ["needle"]
+runtime.semantic_index_changed.emit()
+assert runtime.calls == ["needle", "needle"]
 store.close()
 '''
     environment = os.environ | {
