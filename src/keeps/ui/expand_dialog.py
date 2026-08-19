@@ -36,43 +36,49 @@ _DEFAULT_SIZE = QSize(480, 400)
 _FIND_MATCH_LIMIT = 10_000
 
 
-def _codepoint_offset(text: str, normalized_offset: int) -> int:
-    low, high = 0, len(text)
-    while low < high:
-        middle = (low + high) // 2
-        if len(normalize(text[: middle + 1])) > normalized_offset:
-            high = middle
-        else:
-            low = middle + 1
-    return low
-
-
 def _match_spans(text: str, query: str) -> list[tuple[int, int]]:
     """Return non-overlapping matches using the popup's Unicode normalization."""
+    return _match_spans_with_truncation(text, query)[0]
+
+
+def _match_spans_with_truncation(
+    text: str, query: str
+) -> tuple[list[tuple[int, int]], bool]:
     normalized_text = normalize(text)
     normalized_query = normalize(query)
     if not normalized_query:
-        return []
+        return [], False
     spans = []
     offset = 0
     identity_mapping = len(normalized_text) == len(text)
-    while (
-        len(spans) < _FIND_MATCH_LIMIT
-        and (position := normalized_text.find(normalized_query, offset)) >= 0
-    ):
+    original_index = 0
+    folded_start = 0
+    folded_end = len(normalize(text[0])) if text else 0
+
+    def original_offset(folded_offset: int) -> int:
+        nonlocal original_index, folded_start, folded_end
+        while folded_end <= folded_offset and original_index + 1 < len(text):
+            original_index += 1
+            folded_start = folded_end
+            folded_end = folded_start + len(normalize(text[original_index]))
+        return original_index
+
+    while (position := normalized_text.find(normalized_query, offset)) >= 0:
         end_position = position + len(normalized_query) - 1
         span = (
             (position, end_position + 1)
             if identity_mapping
             else (
-                _codepoint_offset(text, position),
-                _codepoint_offset(text, end_position) + 1,
+                original_offset(position),
+                original_offset(end_position) + 1,
             )
         )
         if not spans or spans[-1] != span:
             spans.append(span)
+            if len(spans) > _FIND_MATCH_LIMIT:
+                return spans[:_FIND_MATCH_LIMIT], True
         offset = position + len(normalized_query)
-    return spans
+    return spans, False
 
 
 def _utf16_offset(text: str, codepoint_offset: int) -> int:
@@ -132,9 +138,9 @@ class _FindBar(QWidget):
         self._query.selectAll()
 
     def _find_first(self) -> None:
-        self._matches = _match_spans(self._editor.toPlainText(), self._query.text())
-        total = normalize(self._editor.toPlainText()).count(normalize(self._query.text()))
-        self._matches_truncated = total > len(self._matches)
+        self._matches, self._matches_truncated = _match_spans_with_truncation(
+            self._editor.toPlainText(), self._query.text()
+        )
         self._current_match = 0 if self._matches else -1
         self._select_current_match()
 

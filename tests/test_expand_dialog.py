@@ -2,7 +2,11 @@ import os
 import subprocess
 import sys
 
-from keeps.ui.expand_dialog import _match_spans, _utf16_offset
+from keeps.ui.expand_dialog import (
+    _match_spans,
+    _match_spans_with_truncation,
+    _utf16_offset,
+)
 
 
 def test_find_spans_use_the_same_unicode_normalization_as_popup_search():
@@ -15,9 +19,17 @@ def test_qt_cursor_offset_counts_astral_characters_as_utf16():
 
 
 def test_find_spans_bound_memory_for_extremely_common_queries():
-    spans = _match_spans("a" * 20_000, "a")
+    spans, truncated = _match_spans_with_truncation("ß" + ("a" * 20_000), "a")
 
     assert len(spans) == 10_000
+    assert truncated is True
+
+
+def test_casefold_dedup_does_not_claim_truncation():
+    spans, truncated = _match_spans_with_truncation("Straße", "s")
+
+    assert spans == [(0, 1), (4, 5)]
+    assert truncated is False
 
 
 def test_edit_dialog_find_bar_seeds_navigates_and_closes():
