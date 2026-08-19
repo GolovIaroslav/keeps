@@ -81,7 +81,7 @@ class _EncodeQueryTask(QRunnable):
 
 
 class _TextEmbedSignals(QObject):
-    finished = Signal(int, bytes)  # (clip_id, embedding_bytes)
+    finished = Signal(int, object)  # (clip_id, embedding_bytes | None)
 
 
 class _TextEmbedTask(QRunnable):
@@ -90,16 +90,24 @@ class _TextEmbedTask(QRunnable):
     embed step, but for clips that never go through OCR.
     """
 
-    def __init__(self, embed_fn, clip_id: int, text: str, signals: _TextEmbedSignals) -> None:
+    def __init__(
+        self, embed_fn, clip_id: int, text: str, signals: _TextEmbedSignals, is_current
+    ) -> None:
         super().__init__()
         self._embed_fn = embed_fn
         self._clip_id = clip_id
         self._text = text
         self._signals = signals
+        self._is_current = is_current
 
     def run(self) -> None:
+        if not self._is_current():
+            self._signals.finished.emit(self._clip_id, None)
+            return
         vec_bytes = self._embed_fn(self._text)
-        self._signals.finished.emit(self._clip_id, vec_bytes)
+        self._signals.finished.emit(
+            self._clip_id, vec_bytes if self._is_current() else None
+        )
 
 
 class _OcrSignals(QObject):
@@ -107,25 +115,20 @@ class _OcrSignals(QObject):
 
 
 class _OcrTask(QRunnable):
-    """Runs off the main thread: OCR the image, and (if RAG is on) embed the
-    recognized text. `embed_fn` must be a pure/thread-safe callable (see
-    AiRuntime.embed_text) -- no Store/Qt access from here.
-    """
+    """Runs OCR off the main thread; embedding is decided on completion."""
 
     def __init__(
-        self, ocr_engine, clip_id: int, png_bytes: bytes, signals: _OcrSignals, embed_fn
+        self, ocr_engine, clip_id: int, png_bytes: bytes, signals: _OcrSignals
     ) -> None:
         super().__init__()
         self._ocr_engine = ocr_engine
         self._clip_id = clip_id
         self._png_bytes = png_bytes
         self._signals = signals
-        self._embed_fn = embed_fn
 
     def run(self) -> None:
         text = self._ocr_engine.extract_text(self._png_bytes)
-        vec_bytes = self._embed_fn(text) if (self._embed_fn is not None and text.strip()) else None
-        self._signals.finished.emit(self._clip_id, text, vec_bytes)
+        self._signals.finished.emit(self._clip_id, text, None)
 
 
 def available_ocr_language_codes(
@@ -163,6 +166,7 @@ class AiRuntime(QObject):
         self._text_embedder_lock = threading.Lock()
         self._ocr_engine = None
         self._last_activity = 0.0
+        self._semantic_generation = 0
         # Keyword search is instant and predictable; semantic inference is
         # opt-in from the popup's mode selector.
         self._search_mode = SearchMode.KEYWORD
@@ -216,6 +220,7 @@ class AiRuntime(QObject):
         if mode == self._search_mode:
             return
         self._search_mode = mode
+        self._semantic_generation += 1
         if self.semantic_search_enabled:
             self.run_text_embed_backlog_sweep()
 
@@ -417,13 +422,26 @@ class AiRuntime(QObject):
             return
         signals = _TextEmbedSignals(self)
         signals.finished.connect(self._on_text_embed_done)
-        task = _TextEmbedTask(self.embed_text, clip_id, text, signals)
+        generation = self._semantic_generation
+        task = _TextEmbedTask(
+            self.embed_text,
+            clip_id,
+            text,
+            signals,
+            lambda: (
+                self._semantic_generation == generation
+                and self._search_mode != SearchMode.KEYWORD
+            ),
+        )
         self._pending_ai_tasks.add(task_key)
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
-    def _on_text_embed_done(self, clip_id: int, vec_bytes: bytes) -> None:
+    def _on_text_embed_done(self, clip_id: int, vec_bytes: bytes | None) -> None:
         self._pending_ai_tasks.discard(("text", clip_id))
-        self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+        if vec_bytes is not None:
+            self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+        elif self.semantic_search_enabled:
+            self._process_clip_text_embed(clip_id)
 
     def run_text_embed_backlog_sweep(self) -> None:
         """Picks up text/html and OCR clips still missing an embedding -- the
@@ -464,10 +482,9 @@ class AiRuntime(QObject):
         engine = self._get_ocr_engine()
         if engine is None:
             return
-        embed_fn = self.embed_text if self.semantic_search_enabled else None
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
-        task = _OcrTask(engine, clip_id, png_bytes, signals, embed_fn)
+        task = _OcrTask(engine, clip_id, png_bytes, signals)
         self._pending_ai_tasks.add(task_key)
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
@@ -477,3 +494,5 @@ class AiRuntime(QObject):
         self._store.set_ocr_text(clip_id, text)
         if vec_bytes is not None:
             self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+        elif self.semantic_search_enabled and text.strip():
+            self._process_clip_text_embed(clip_id)

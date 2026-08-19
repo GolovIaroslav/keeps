@@ -45,9 +45,15 @@ def _match_spans(text: str, query: str) -> list[tuple[int, int]]:
     offset = 0
     while (position := normalized_text.find(normalized_query, offset)) >= 0:
         end_position = position + len(normalized_query) - 1
-        spans.append((original_indexes[position], original_indexes[end_position] + 1))
+        span = (original_indexes[position], original_indexes[end_position] + 1)
+        if not spans or spans[-1] != span:
+            spans.append(span)
         offset = position + len(normalized_query)
     return spans
+
+
+def _utf16_offset(text: str, codepoint_offset: int) -> int:
+    return len(text[:codepoint_offset].encode("utf-16-le")) // 2
 
 
 class _FindBar(QWidget):
@@ -126,9 +132,12 @@ class _FindBar(QWidget):
             self._counter.setText("0 / 0")
             return
         start, end = self._matches[self._current_match]
+        text = self._editor.toPlainText()
         match = QTextCursor(self._editor.document())
-        match.setPosition(start)
-        match.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        match.setPosition(_utf16_offset(text, start))
+        match.setPosition(
+            _utf16_offset(text, end), QTextCursor.MoveMode.KeepAnchor
+        )
         self._editor.setTextCursor(match)
         self._editor.ensureCursorVisible()
         highlight = QTextEdit.ExtraSelection()

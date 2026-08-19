@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from keeps import __version__, autostart, config, desktop_apps, diagnostics, multi_paste, paste
-from keeps.ai import download, models
+from keeps.ai import download, models, ranking
 from keeps.ai.runtime import AiRuntime
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
@@ -867,8 +867,12 @@ class SettingsDialog(QDialog):
 
     def _on_rag_toggled(self, checked: bool) -> None:
         self._save("ai/rag_text_enabled", checked)
-        if checked and self._ai_runtime is not None:
+        if self._ai_runtime is None:
+            return
+        if checked:
             self._ai_runtime.run_text_embed_backlog_sweep()
+        else:
+            self._ai_runtime.set_search_mode(ranking.SearchMode.KEYWORD)
 
     def _build_model_section(
         self,
