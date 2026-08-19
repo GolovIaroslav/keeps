@@ -54,7 +54,7 @@ def test_ctrl_a_in_search_field_selects_search_text_not_clip_rows():
         search_edit=search_edit,
         list_view=object(),
         tabs=object(),
-        _mode_badge=object(),
+        _mode_combo=object(),
         _handle_wheel=lambda _event: False,
         _handle_key=lambda _event: True,
     )

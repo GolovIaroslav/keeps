@@ -369,6 +369,18 @@ class SettingsDialog(QDialog):
         )
         form.addRow(self.tr("Keep search after paste"), keep_search)
 
+        short_keywords = QCheckBox()
+        short_keywords.setChecked(
+            bool(config.get(self._settings, "popup/keyword_short_first"))
+        )
+        short_keywords.setToolTip(
+            self.tr("Prefer compact clips where the query makes up more of the text")
+        )
+        short_keywords.toggled.connect(
+            lambda v: self._save("popup/keyword_short_first", v)
+        )
+        form.addRow(self.tr("Short keyword matches first"), short_keywords)
+
         multi_separator = QLineEdit(
             multi_paste.separator_to_display(
                 str(config.get(self._settings, "paste/multi_separator"))

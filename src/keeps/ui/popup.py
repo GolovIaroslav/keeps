@@ -37,6 +37,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -135,29 +136,29 @@ def _local_hotkey_error(sequence_text: str, reserved: set[str]) -> str | None:
         return None
     return "modifier-required"
 
-_MODE_BADGE_LABELS = {
+_MODE_LABELS = {
     ranking.SearchMode.BLENDED: "auto",
     ranking.SearchMode.KEYWORD: "keywords",
     ranking.SearchMode.SEMANTIC: "meaning",
 }
 
-# Clicking the badge cycles modes the same way Ctrl+M does (PLAN.md §9);
-# the tooltip exists because "auto"/"keywords"/"meaning" alone read as
-# unexplained jargon otherwise (user feedback 2026-07-11).
-_MODE_BADGE_TOOLTIPS = {
+_MODE_DESCRIPTIONS = {
     ranking.SearchMode.BLENDED: (
-        "Auto (default): exact matches first, semantically related results "
-        "included below them. Click to switch mode, or Ctrl+M."
+        "Auto: keyword matches first, then semantically related results."
     ),
     ranking.SearchMode.KEYWORD: (
-        "Keywords only: exact substring matches, no semantic ranking. "
-        "Click to switch mode, or Ctrl+M."
+        "Keywords: fast exact-text search without loading the semantic model."
     ),
     ranking.SearchMode.SEMANTIC: (
-        "Meaning only: ranked purely by semantic similarity to your query, "
-        "ignoring exact matches. Click to switch mode, or Ctrl+M."
+        "Meaning: semantic similarity only; may take longer and load the model."
     ),
 }
+
+_MODE_ORDER = (
+    ranking.SearchMode.KEYWORD,
+    ranking.SearchMode.BLENDED,
+    ranking.SearchMode.SEMANTIC,
+)
 
 
 class ClipListModel(QAbstractListModel):
@@ -167,6 +168,7 @@ class ClipListModel(QAbstractListModel):
         super().__init__(parent)
         self._store = store
         self._ai_runtime = ai_runtime
+        self._settings = config.open_settings()
         self._clips: list[Clip] = []
         self._current_query = ""
         self._semantic_scores: dict[int, float] = {}
@@ -202,7 +204,12 @@ class ClipListModel(QAbstractListModel):
         self._current_query = query
         self._semantic_scores = {}
         self._rebuild()
-        if self._ai_runtime is not None and self._ai_runtime.rag_text_enabled and query.strip():
+        if (
+            self._ai_runtime is not None
+            and self._ai_runtime.rag_text_enabled
+            and self._ai_runtime.search_mode != ranking.SearchMode.KEYWORD
+            and query.strip()
+        ):
             self._ai_runtime.encode_query_async(query, self._on_semantic_scores)
 
     def set_scope(self, scope: str) -> None:
@@ -217,11 +224,15 @@ class ClipListModel(QAbstractListModel):
 
     def _rebuild(self) -> None:
         substring_clips, keyword_reasons = self._store.search_with_reasons(
-            self._current_query
+            self._current_query,
+            prefer_short=bool(
+                config.get(self._settings, "popup/keyword_short_first")
+            ),
         )
         rag_active = (
             self._ai_runtime is not None
             and self._ai_runtime.rag_text_enabled
+            and self._ai_runtime.search_mode != ranking.SearchMode.KEYWORD
             and bool(self._current_query.strip())
         )
         if rag_active:
@@ -387,13 +398,15 @@ class PopupWindow(QWidget):
         self.search_edit.setPlaceholderText(self.tr("Search clips..."))
         self.search_edit.installEventFilter(self)
 
-        # Search-mode badge (Ctrl+M cycles auto/keywords/meaning) -- only
-        # shown when ai/rag_text_enabled, since there's nothing to switch
-        # between otherwise (PLAN.md §9).
-        self._mode_badge = QLabel(self)
-        self._mode_badge.setVisible(False)
-        self._mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_badge.installEventFilter(self)
+        self._mode_combo = QComboBox(self)
+        for mode in _MODE_ORDER:
+            self._mode_combo.addItem(self.tr(_MODE_LABELS[mode]), mode)
+            self._mode_combo.setItemData(
+                self._mode_combo.count() - 1,
+                self.tr(_MODE_DESCRIPTIONS[mode]),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self._mode_combo.currentIndexChanged.connect(self._select_search_mode)
 
         self._history_menu = QMenu(self)
         self._history_button = QToolButton(self)
@@ -433,7 +446,7 @@ class PopupWindow(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
         search_row.addWidget(self._history_button)
-        search_row.addWidget(self._mode_badge)
+        search_row.addWidget(self._mode_combo)
 
         self._title_bar = _TitleBar(self)
         title_bar_layout = QHBoxLayout(self._title_bar)
@@ -516,7 +529,7 @@ class PopupWindow(QWidget):
         if not self._preserve_search_once:
             self.search_edit.clear()
         self._preserve_search_once = False
-        self._update_mode_badge()
+        self._update_mode_combo()
         self._refresh_tabs()
         self.refresh()
         self._select_row(0)
@@ -792,9 +805,6 @@ class PopupWindow(QWidget):
             return self._handle_key(event)
         if obj is self.tabs and event.type() == QEvent.Type.KeyPress:
             return self._handle_key(event)
-        if obj is self._mode_badge and event.type() == QEvent.Type.MouseButtonPress:
-            self._cycle_search_mode()
-            return True
         # A resize-edge cursor set by mouseMoveEvent (near the window border,
         # see below) otherwise sticks once the mouse crosses into a child
         # widget -- Qt doesn't re-deliver mouseMoveEvent to this window once
@@ -1532,16 +1542,28 @@ class PopupWindow(QWidget):
         if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
             return  # nothing to switch between when RAG is off (PLAN.md §9)
         self._ai_runtime.search_mode = self._ai_runtime.search_mode.next()
-        self._update_mode_badge()
+        self._update_mode_combo()
         self.refresh()
 
-    def _update_mode_badge(self) -> None:
+    def _select_search_mode(self, index: int) -> None:
+        if self._ai_runtime is None or index < 0:
+            return
+        mode = self._mode_combo.itemData(index)
+        if mode == self._ai_runtime.search_mode:
+            return
+        self._ai_runtime.search_mode = mode
+        self._update_mode_combo()
+        self.refresh()
+
+    def _update_mode_combo(self) -> None:
         rag_on = self._ai_runtime is not None and self._ai_runtime.rag_text_enabled
-        self._mode_badge.setVisible(rag_on)
-        if rag_on:
-            mode = self._ai_runtime.search_mode
-            self._mode_badge.setText(f"[{self.tr(_MODE_BADGE_LABELS[mode])}]")
-            self._mode_badge.setToolTip(self.tr(_MODE_BADGE_TOOLTIPS[mode]))
+        self._mode_combo.setEnabled(rag_on)
+        mode = self._ai_runtime.search_mode if rag_on else ranking.SearchMode.KEYWORD
+        index = self._mode_combo.findData(mode)
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.setCurrentIndex(index)
+        self._mode_combo.blockSignals(False)
+        self._mode_combo.setToolTip(self.tr(_MODE_DESCRIPTIONS[mode]))
 
     # -- UI scale (Ctrl+scroll / Ctrl+Plus / Ctrl+Minus, §6) ----------------
 
@@ -1633,7 +1655,12 @@ class PopupWindow(QWidget):
             return
         clip = self.model.clip_at(row)
         mime_data = self.store.get_data(clip.id)
-        ViewDialog(clip, mime_data, self).exec()
+        ViewDialog(
+            clip,
+            mime_data,
+            self,
+            initial_query=self.search_edit.text().strip(),
+        ).exec()
         self.search_edit.setFocus()
 
     def _properties_current(self) -> None:
@@ -1734,7 +1761,11 @@ class PopupWindow(QWidget):
         if clip.kind not in EDITABLE_KINDS:
             return
         text = self.store.get_data(clip.id).get("text/plain", b"").decode("utf-8", errors="replace")
-        dialog = EditDialog(text, self)
+        dialog = EditDialog(
+            text,
+            self,
+            initial_query=self.search_edit.text().strip(),
+        )
         if dialog.exec():
             self._update_clip_content(
                 clip.id, {"text/plain": dialog.text().encode("utf-8")}

@@ -163,7 +163,9 @@ class AiRuntime(QObject):
         self._text_embedder_lock = threading.Lock()
         self._ocr_engine = None
         self._last_activity = 0.0
-        self.search_mode = SearchMode.BLENDED
+        # Keyword search is instant and predictable; semantic inference is
+        # opt-in from the popup's mode selector.
+        self.search_mode = SearchMode.KEYWORD
 
         # Serialized (maxThreadCount=1): query encoding and model indexing
         # share one pool so two ONNX sessions cannot multiply RSS. Queries

@@ -80,9 +80,9 @@ def test_missing_clip_lookup_is_skipped_not_crashed():
 
 
 MODE_CYCLE_CASES = [
-    (SearchMode.BLENDED, SearchMode.KEYWORD),
-    (SearchMode.KEYWORD, SearchMode.SEMANTIC),
-    (SearchMode.SEMANTIC, SearchMode.BLENDED),
+    (SearchMode.KEYWORD, SearchMode.BLENDED),
+    (SearchMode.BLENDED, SearchMode.SEMANTIC),
+    (SearchMode.SEMANTIC, SearchMode.KEYWORD),
 ]
 
 

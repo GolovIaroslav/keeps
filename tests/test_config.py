@@ -7,6 +7,12 @@ import pytest
 from keeps import config
 
 
+def test_short_keyword_ranking_is_enabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    assert config.get(config.open_settings(), "popup/keyword_short_first") is True
+
+
 def test_open_settings_recovers_values_from_duplicate_general_sections(tmp_path, monkeypatch):
     config_home = tmp_path / "config"
     settings_path = config_home / "keeps" / "keeps.ini"

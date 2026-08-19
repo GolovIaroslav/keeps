@@ -791,7 +791,7 @@ class Store:
         return self.search_with_reasons(query)[0]
 
     def search_with_reasons(
-        self, query: str
+        self, query: str, *, prefer_short: bool = False
     ) -> tuple[list[Clip], dict[int, MatchReason]]:
         """Full-content, casefolded AND search plus exact/OCR match reasons."""
         if not query.strip():
@@ -814,6 +814,13 @@ class Store:
                 ).fetchall()
             )
         rows.sort(key=lambda row: (row["last_used_at"], row["id"]), reverse=True)
+        if prefer_short:
+            rows.sort(
+                key=lambda row: self._search_index.keyword_rank(
+                    row["id"], query, reasons[row["id"]]
+                ),
+                reverse=True,
+            )
         return [self._row_to_clip(row) for row in rows], reasons
 
     def search_snippet(

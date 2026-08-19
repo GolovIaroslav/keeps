@@ -22,7 +22,7 @@ class SearchMode(Enum):
 
     def next(self) -> SearchMode:
         """Cycle order for the Ctrl+M toggle in the popup."""
-        order = [SearchMode.BLENDED, SearchMode.KEYWORD, SearchMode.SEMANTIC]
+        order = [SearchMode.KEYWORD, SearchMode.BLENDED, SearchMode.SEMANTIC]
         return order[(order.index(self) + 1) % len(order)]
 
 

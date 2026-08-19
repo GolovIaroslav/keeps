@@ -26,6 +26,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QSettings
 
 from keeps.ai import models
+from keeps.ai.ranking import SearchMode
 from keeps.ai.runtime import AiRuntime, available_ocr_language_codes
 from keeps.store import Store
 
@@ -126,6 +127,12 @@ def test_background_ai_pool_is_bounded_for_model_memory(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True, ocr=True)
 
     assert runtime.ai_task_max_threads == 1
+
+
+def test_keyword_search_is_the_default_mode(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+
+    assert runtime.search_mode == SearchMode.KEYWORD
 
 
 # -- text/html capture -> embedding (independent of OCR) ---------------------

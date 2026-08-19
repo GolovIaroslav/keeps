@@ -234,6 +234,20 @@ def test_search_keeps_history_order_without_hydrating_non_matches(store):
     assert [clip.id for clip in results] == [newer, older]
 
 
+def test_keyword_search_can_prefer_short_dense_matches(store):
+    short = store.add("text", {"text/plain": b"/home/jar/projects"})
+    long = store.add(
+        "text",
+        {"text/plain": b"projects " + (b"long prompt filler " * 300)},
+    )
+
+    recent, _ = store.search_with_reasons("projects")
+    dense, _ = store.search_with_reasons("projects", prefer_short=True)
+
+    assert [clip.id for clip in recent] == [long, short]
+    assert [clip.id for clip in dense] == [short, long]
+
+
 def test_search_index_tracks_content_updates_and_deletion(store):
     clip_id = store.add("text", {"text/plain": b"before"})
 

@@ -138,6 +138,28 @@ class SearchIndex:
                 matches[clip_id] = MatchReason.OCR
         return matches
 
+    def keyword_rank(
+        self, clip_id: int, query: str, reason: MatchReason
+    ) -> tuple[int, float, int]:
+        """Rank exact hits by phrase match, match density, then source length."""
+        document = self._documents.get(clip_id)
+        if document is None or reason == MatchReason.SEMANTIC:
+            return (0, 0.0, 0)
+        terms = [normalize(term) for term in query.split() if term]
+        if reason == MatchReason.EXACT and all(
+            term in document.normalized_alias for term in terms
+        ):
+            source = document.normalized_alias
+        elif reason == MatchReason.OCR:
+            source = document.normalized_ocr
+        else:
+            source = document.normalized_content
+        if not source:
+            return (0, 0.0, 0)
+        phrase = normalize(query.strip())
+        matched_chars = sum(len(term) for term in terms)
+        return (int(phrase in source), matched_chars / len(source), -len(source))
+
     def snippet(self, clip_id: int, query: str, reason: MatchReason) -> str | None:
         document = self._documents.get(clip_id)
         if document is None or reason == MatchReason.SEMANTIC:

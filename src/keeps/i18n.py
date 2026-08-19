@@ -670,6 +670,23 @@ _TRANSLATIONS["ru"].update(
         "auto": "авто",
         "keywords": "ключевые слова",
         "meaning": "смысл",
+        "Auto: keyword matches first, then semantically related results.": (
+            "Авто: сначала совпадения по словам, затем похожие по смыслу."
+        ),
+        "Keywords: fast exact-text search without loading the semantic model.": (
+            "Ключевые слова: быстрый точный поиск без загрузки семантической модели."
+        ),
+        "Meaning: semantic similarity only; may take longer and load the model.": (
+            "Смысл: только семантическая близость; может работать дольше и загрузить модель."
+        ),
+        "Short keyword matches first": "Сначала короткие совпадения",
+        "Prefer compact clips where the query makes up more of the text": (
+            "Поднимать компактные записи, где запрос составляет большую часть текста"
+        ),
+        "Find in clip...": "Найти в записи...",
+        "Previous match (Shift+Enter)": "Предыдущее совпадение (Shift+Enter)",
+        "Next match (Enter)": "Следующее совпадение (Enter)",
+        "Close search": "Закрыть поиск",
         "Copy": "Копировать",
         "Paste clip {clip_id}": "Вставить клип {clip_id}",
     }
