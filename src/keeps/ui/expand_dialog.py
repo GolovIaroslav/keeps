@@ -7,7 +7,15 @@ Ctrl+E, xdg-open+temp-file+QFileSystemWatcher) which is unrelated and unchanged.
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -21,10 +29,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from keeps.store import Clip
+from keeps.store import Clip, normalize, normalize_with_mapping
 from keeps.ui.format import format_byte_size, text_statistics
 
 _DEFAULT_SIZE = QSize(480, 400)
+
+
+def _match_spans(text: str, query: str) -> list[tuple[int, int]]:
+    """Return non-overlapping matches using the popup's Unicode normalization."""
+    normalized_text, original_indexes = normalize_with_mapping(text)
+    normalized_query = normalize(query)
+    if not normalized_query:
+        return []
+    spans = []
+    offset = 0
+    while (position := normalized_text.find(normalized_query, offset)) >= 0:
+        end_position = position + len(normalized_query) - 1
+        spans.append((original_indexes[position], original_indexes[end_position] + 1))
+        offset = position + len(normalized_query)
+    return spans
 
 
 class _FindBar(QWidget):
@@ -33,6 +56,8 @@ class _FindBar(QWidget):
     def __init__(self, editor: QPlainTextEdit, parent=None) -> None:
         super().__init__(parent)
         self._editor = editor
+        self._matches: list[tuple[int, int]] = []
+        self._current_match = -1
         self._query = QLineEdit(self)
         self._query.setPlaceholderText(self.tr("Find in clip..."))
         self._counter = QLabel("0 / 0", self)
@@ -58,6 +83,7 @@ class _FindBar(QWidget):
         layout.addWidget(close_button)
 
         self._query.textChanged.connect(self._find_first)
+        self._editor.textChanged.connect(self._find_first)
         self._query.returnPressed.connect(self.find_next)
         QShortcut(QKeySequence("Shift+Return"), self._query).activated.connect(
             self.find_previous
@@ -76,40 +102,33 @@ class _FindBar(QWidget):
         self._query.selectAll()
 
     def _find_first(self) -> None:
-        cursor = self._editor.textCursor()
-        cursor.movePosition(cursor.MoveOperation.Start)
-        self._find_from(cursor, backward=False)
+        self._matches = _match_spans(self._editor.toPlainText(), self._query.text())
+        self._current_match = 0 if self._matches else -1
+        self._select_current_match()
 
     def find_next(self) -> None:
-        self._find_from(self._editor.textCursor(), backward=False)
+        if not self._matches:
+            self._find_first()
+            return
+        self._current_match = (self._current_match + 1) % len(self._matches)
+        self._select_current_match()
 
     def find_previous(self) -> None:
-        cursor = self._editor.textCursor()
-        cursor.setPosition(cursor.selectionStart())
-        self._find_from(cursor, backward=True)
+        if not self._matches:
+            self._find_first()
+            return
+        self._current_match = (self._current_match - 1) % len(self._matches)
+        self._select_current_match()
 
-    def _find_from(self, cursor, *, backward: bool) -> None:
-        query = self._query.text()
-        if not query:
+    def _select_current_match(self) -> None:
+        if self._current_match < 0:
             self._editor.setExtraSelections([])
             self._counter.setText("0 / 0")
             return
-        flag = (
-            self._editor.document().FindFlag.FindBackward
-            if backward
-            else self._editor.document().FindFlag(0)
-        )
-        match = self._editor.document().find(query, cursor, flag)
-        if match.isNull():
-            cursor.movePosition(
-                cursor.MoveOperation.End if backward else cursor.MoveOperation.Start
-            )
-            match = self._editor.document().find(query, cursor, flag)
-        if match.isNull():
-            self._editor.setExtraSelections([])
-            self._counter.setText("0 / 0")
-            return
-
+        start, end = self._matches[self._current_match]
+        match = QTextCursor(self._editor.document())
+        match.setPosition(start)
+        match.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
         self._editor.setTextCursor(match)
         self._editor.ensureCursorVisible()
         highlight = QTextEdit.ExtraSelection()
@@ -118,11 +137,7 @@ class _FindBar(QWidget):
         highlight.format.setForeground(QColor("#171717"))
         self._editor.setExtraSelections([highlight])
 
-        text = self._editor.toPlainText()
-        folded_query = query.casefold()
-        total = text.casefold().count(folded_query)
-        current = text[: match.selectionStart()].casefold().count(folded_query) + 1
-        self._counter.setText(f"{current} / {total}")
+        self._counter.setText(f"{self._current_match + 1} / {len(self._matches)}")
 
 
 def _clip_text(clip: Clip, mime_data: dict[str, bytes]) -> str:

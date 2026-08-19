@@ -165,7 +165,7 @@ class AiRuntime(QObject):
         self._last_activity = 0.0
         # Keyword search is instant and predictable; semantic inference is
         # opt-in from the popup's mode selector.
-        self.search_mode = SearchMode.KEYWORD
+        self._search_mode = SearchMode.KEYWORD
 
         # Serialized (maxThreadCount=1): query encoding and model indexing
         # share one pool so two ONNX sessions cannot multiply RSS. Queries
@@ -203,6 +203,21 @@ class AiRuntime(QObject):
     @property
     def rag_text_enabled(self) -> bool:
         return bool(config.get(self._settings, "ai/rag_text_enabled"))
+
+    @property
+    def search_mode(self) -> SearchMode:
+        return self._search_mode
+
+    @property
+    def semantic_search_enabled(self) -> bool:
+        return self.rag_text_enabled and self.search_mode != SearchMode.KEYWORD
+
+    def set_search_mode(self, mode: SearchMode) -> None:
+        if mode == self._search_mode:
+            return
+        self._search_mode = mode
+        if self.semantic_search_enabled:
+            self.run_text_embed_backlog_sweep()
 
     @property
     def ai_task_max_threads(self) -> int:
@@ -370,7 +385,7 @@ class AiRuntime(QObject):
 
     def on_clip_captured(self, clip_id: int, kind: str) -> None:
         """Connected to each capture watcher's `clip_added` signal."""
-        if kind in ("text", "html") and self.rag_text_enabled:
+        if kind in ("text", "html") and self.semantic_search_enabled:
             # No timing knob here (unlike OCR, §9.2): encode() is ~13ms warm
             # (PLAN.md §9 live smoke test), so always indexing immediately
             # needs no debounce/schedule setting of its own.
@@ -395,8 +410,9 @@ class AiRuntime(QObject):
             clip_id, models.TEXT_EMBED.name
         ):
             return
-        mime_data = self._store.get_data(clip_id)
-        text = mime_data.get("text/plain", b"").decode("utf-8", errors="replace")
+        text = self._store.embedding_text(clip_id)
+        if text is None:
+            return
         if not text.strip():
             return
         signals = _TextEmbedSignals(self)
@@ -410,10 +426,10 @@ class AiRuntime(QObject):
         self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
 
     def run_text_embed_backlog_sweep(self) -> None:
-        """Picks up every text/html clip still missing an embedding -- the
-        one-time pass over pre-existing history on first enabling RAG.
+        """Picks up text/html and OCR clips still missing an embedding -- the
+        one-time pass when semantic search is explicitly selected.
         """
-        if not self.rag_text_enabled:
+        if not self.semantic_search_enabled:
             return
         for clip_id in self._store.clips_missing_embedding(models.TEXT_EMBED.name):
             self._process_clip_text_embed(clip_id)
@@ -448,7 +464,7 @@ class AiRuntime(QObject):
         engine = self._get_ocr_engine()
         if engine is None:
             return
-        embed_fn = self.embed_text if self.rag_text_enabled else None
+        embed_fn = self.embed_text if self.semantic_search_enabled else None
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
         task = _OcrTask(engine, clip_id, png_bytes, signals, embed_fn)

@@ -597,6 +597,21 @@ class Store:
             ),
         )
 
+    def count_in_scope(self, scope: str) -> int:
+        if scope == "history":
+            where, params = "1", ()
+        elif scope == "pinned":
+            where, params = "pinned = 1", ()
+        elif scope.startswith("group:"):
+            where, params = "group_id = ?", (int(scope.partition(":")[2]),)
+        else:
+            raise ValueError(f"unknown scope: {scope}")
+        return int(
+            self._conn.execute(
+                f"SELECT count(*) FROM clips WHERE {where}", params
+            ).fetchone()[0]
+        )
+
     def create_group(self, name: str) -> int:
         name = name.strip()
         if not name:
@@ -845,10 +860,23 @@ class Store:
         row = self._conn.execute(
             "SELECT 1 FROM clips c LEFT JOIN embeddings e "
             "ON e.clip_id = c.id AND e.model = ? "
-            "WHERE c.id = ? AND c.kind IN ('text', 'html') AND e.clip_id IS NULL",
+            "WHERE c.id = ? AND (c.kind IN ('text', 'html') OR "
+            "(c.kind = 'image' AND trim(coalesce(c.ocr_text, '')) != '')) "
+            "AND e.clip_id IS NULL",
             (model, clip_id),
         ).fetchone()
         return row is not None
+
+    def embedding_text(self, clip_id: int) -> str | None:
+        row = self._conn.execute(
+            "SELECT kind, ocr_text FROM clips WHERE id = ?", (clip_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        if row["kind"] == "image":
+            return row["ocr_text"]
+        data = self.get_data(clip_id).get("text/plain")
+        return data.decode("utf-8", errors="replace") if data is not None else None
 
     def clip_needs_ocr(self, clip_id: int) -> bool:
         row = self._conn.execute(
@@ -881,11 +909,13 @@ class Store:
         return [row["id"] for row in rows]
 
     def clips_missing_embedding(self, model: str) -> list[int]:
-        """Text/html clip ids with no `model` embedding yet -- text-RAG backlog sweep."""
+        """Text/html or OCR-image ids missing the requested embedding."""
         rows = self._conn.execute(
             "SELECT c.id FROM clips c "
             "LEFT JOIN embeddings e ON e.clip_id = c.id AND e.model = ? "
-            "WHERE c.kind IN ('text', 'html') AND e.clip_id IS NULL",
+            "WHERE (c.kind IN ('text', 'html') OR "
+            "(c.kind = 'image' AND trim(coalesce(c.ocr_text, '')) != '')) "
+            "AND e.clip_id IS NULL",
             (model,),
         ).fetchall()
         return [row["id"] for row in rows]

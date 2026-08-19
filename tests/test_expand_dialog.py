@@ -2,6 +2,12 @@ import os
 import subprocess
 import sys
 
+from keeps.ui.expand_dialog import _match_spans
+
+
+def test_find_spans_use_the_same_unicode_normalization_as_popup_search():
+    assert _match_spans("Straße and STRASSE", "strasse") == [(0, 6), (11, 18)]
+
 
 def test_edit_dialog_find_bar_seeds_navigates_and_closes():
     script = r'''

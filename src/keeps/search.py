@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
-from keeps.store import normalize, normalize_with_mapping
+from keeps.store import normalize
 from keeps.text_encoding import normalize_plain_text
 
 CONTENT_LIMIT_BYTES = 10 * 1024
@@ -64,6 +64,18 @@ def _content_for(kind: str, mime_data: dict[str, bytes]) -> str:
     if kind == "files":
         return _file_names(mime_data.get("text/uri-list", b""))
     return ""
+
+
+def _original_offset(source: str, normalized_offset: int) -> int:
+    """Map one folded offset using C-level casefolds instead of an int map."""
+    low, high = 0, len(source)
+    while low < high:
+        middle = (low + high) // 2
+        if len(normalize(source[: middle + 1])) > normalized_offset:
+            high = middle
+        else:
+            low = middle + 1
+    return low
 
 
 class SearchIndex:
@@ -170,13 +182,13 @@ class SearchIndex:
             source = document.alias
         else:
             source = document.content if reason == MatchReason.EXACT else document.ocr
-        normalized_source, original_indexes = normalize_with_mapping(source)
+        normalized_source = normalize(source)
         positions = [
-            original_indexes[normalized_source.find(normalize(term))]
+            normalized_source.find(normalize(term))
             for term in query.split()
             if normalize(term) in normalized_source
         ]
-        first_match = min(positions, default=0)
+        first_match = _original_offset(source, min(positions, default=0))
         start = max(0, first_match - SNIPPET_CONTEXT_CHARS)
         end = min(len(source), start + SNIPPET_MAX_CHARS)
         snippet = source[start:end]

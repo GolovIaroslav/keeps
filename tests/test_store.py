@@ -248,6 +248,15 @@ def test_keyword_search_can_prefer_short_dense_matches(store):
     assert [clip.id for clip in dense] == [short, long]
 
 
+def test_count_in_scope_does_not_need_to_hydrate_clips(store):
+    first = store.add("text", {"text/plain": b"first"})
+    store.add("text", {"text/plain": b"second"})
+    store.set_pinned(first, True)
+
+    assert store.count_in_scope("history") == 2
+    assert store.count_in_scope("pinned") == 1
+
+
 def test_search_index_tracks_content_updates_and_deletion(store):
     clip_id = store.add("text", {"text/plain": b"before"})
 

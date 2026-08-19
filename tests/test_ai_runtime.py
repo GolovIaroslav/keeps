@@ -142,6 +142,7 @@ def test_text_clip_gets_embedded_when_rag_enabled(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True)
     fake = FakeEmbedder()
     runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("text", {"text/plain": b"hello world"})
     runtime.on_clip_captured(clip_id, "text")
@@ -155,6 +156,7 @@ def test_duplicate_text_capture_does_not_repeat_completed_embedding(qapp, store,
     runtime = _make_runtime(store, settings, rag_text=True)
     fake = FakeEmbedder()
     runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("text", {"text/plain": b"same text"})
     runtime.on_clip_captured(clip_id, "text")
@@ -265,6 +267,7 @@ def test_ocr_text_gets_embedded_when_rag_and_ocr_both_enabled(qapp, store, setti
     runtime._ocr_engine = FakeOcrEngine("screenshot text")
     fake_embedder = FakeEmbedder()
     runtime._text_embedder = fake_embedder
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("image", {"image/png": PNG_1X1})
     runtime.on_clip_captured(clip_id, "image")
@@ -292,6 +295,7 @@ def test_ocr_skips_embedding_for_blank_recognized_text(qapp, store, settings):
     runtime._ocr_engine = FakeOcrEngine("   ")
     fake_embedder = FakeEmbedder()
     runtime._text_embedder = fake_embedder
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("image", {"image/png": PNG_1X1})
     runtime.on_clip_captured(clip_id, "image")
@@ -305,16 +309,45 @@ def test_ocr_skips_embedding_for_blank_recognized_text(qapp, store, settings):
 # -- backlog sweeps (one-time pass when a toggle is first enabled) ----------
 
 
-def test_text_embed_backlog_sweep_embeds_all_missing_clips(qapp, store, settings):
+def test_selecting_semantic_mode_embeds_backlog_but_keyword_mode_does_not(
+    qapp, store, settings
+):
     runtime = _make_runtime(store, settings, rag_text=True)
     runtime._text_embedder = FakeEmbedder()
     ids = [store.add("text", {"text/plain": f"clip {i}".encode()}) for i in range(3)]
 
+    for clip_id in ids:
+        runtime.on_clip_captured(clip_id, "text")
     runtime.run_text_embed_backlog_sweep()
+    _settle(qapp)
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     assert _pump_until(
         qapp, lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == len(ids)
     )
+
+
+def test_ocr_created_in_keyword_mode_is_embedded_after_semantic_activation(
+    qapp, store, settings
+):
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
+    )
+    runtime._ocr_engine = FakeOcrEngine("searchable screenshot")
+    fake_embedder = FakeEmbedder()
+    runtime._text_embedder = fake_embedder
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
+    assert fake_embedder.calls == ["searchable screenshot"]
 
 
 def test_text_embed_backlog_sweep_noop_when_rag_disabled(qapp, store, settings):

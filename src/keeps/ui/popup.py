@@ -66,7 +66,7 @@ from keeps.popup_keymap import (
     setting_key,
 )
 from keeps.search import MatchReason, remember_query
-from keeps.store import Clip, Store
+from keeps.store import Clip, Store, normalize
 from keeps.ui import geometry, text_transform
 from keeps.ui.delegate import ClipItemDelegate
 from keeps.ui.expand_dialog import EditDialog, ViewDialog
@@ -259,6 +259,14 @@ class ClipListModel(QAbstractListModel):
             for clip in clips:
                 keyword_reason = keyword_reasons.get(clip.id)
                 if keyword_reason is None:
+                    continue
+                visible_text = clip.alias or clip.preview
+                normalized_visible = normalize(visible_text)
+                if all(
+                    normalize(term) in normalized_visible
+                    for term in self._current_query.split()
+                    if term
+                ):
                     continue
                 snippet = self._store.search_snippet(
                     clip.id, self._current_query, keyword_reason
@@ -671,7 +679,7 @@ class PopupWindow(QWidget):
 
     def _update_count_label(self) -> None:
         scope = str(self.tabs.tabData(self.tabs.currentIndex()))
-        total = len(self.store.clips_in_scope(scope))
+        total = self.store.count_in_scope(scope)
         self._count_label.setText(self.tr("{shown} shown / {total} total").format(
             shown=self.model.rowCount(), total=total
         ))
@@ -761,7 +769,11 @@ class PopupWindow(QWidget):
         self.list_view.viewport().update()
 
     def _apply_filter(self) -> None:
-        self.refresh()
+        # Keystrokes only change the filtered model. Full refresh also prunes
+        # caches and hotkeys against the whole history and is intentionally
+        # reserved for actual data/settings changes.
+        self.model.set_query(self.search_edit.text())
+        self._update_count_label()
         self._select_row(0)
 
     def _select_row(self, row: int) -> None:
@@ -1541,7 +1553,7 @@ class PopupWindow(QWidget):
     def _cycle_search_mode(self) -> None:
         if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
             return  # nothing to switch between when RAG is off (PLAN.md §9)
-        self._ai_runtime.search_mode = self._ai_runtime.search_mode.next()
+        self._ai_runtime.set_search_mode(self._ai_runtime.search_mode.next())
         self._update_mode_combo()
         self.refresh()
 
@@ -1551,7 +1563,7 @@ class PopupWindow(QWidget):
         mode = self._mode_combo.itemData(index)
         if mode == self._ai_runtime.search_mode:
             return
-        self._ai_runtime.search_mode = mode
+        self._ai_runtime.set_search_mode(mode)
         self._update_mode_combo()
         self.refresh()
 
