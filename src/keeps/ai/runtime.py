@@ -5,6 +5,7 @@ download.py, text_embed.py, ranking.py stay Qt-free and independently testable.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -25,6 +26,7 @@ SCHEDULED_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facing
 AI_TASK_MAX_THREADS = 1  # bound OCR/RAG working memory; model inference is CPU-heavy
 SEMANTIC_REFRESH_BATCH = 8
+logger = logging.getLogger(__name__)
 
 
 def _release_unused_heap_memory() -> None:
@@ -115,7 +117,12 @@ class _ImageEmbedTask(QRunnable):
         if not self._is_current():
             self._signals.finished.emit(self._clip_id, self._source_hash, None)
             return
-        vec_bytes = self._embed_fn(self._image_bytes)
+        try:
+            vec_bytes = self._embed_fn(self._image_bytes)
+        except Exception:
+            logger.exception("visual embedding failed for clip %s", self._clip_id)
+            self._signals.finished.emit(self._clip_id, self._source_hash, b"")
+            return
         self._signals.finished.emit(
             self._clip_id,
             self._source_hash,
@@ -662,7 +669,7 @@ class AiRuntime(QObject):
     ) -> None:
         self._pending_ai_tasks.discard(("image", clip_id))
         source_is_current = self._store.content_hash(clip_id) == source_hash
-        if vec_bytes is not None and source_is_current:
+        if vec_bytes and source_is_current:
             self._store.set_embedding(clip_id, models.IMAGE_EMBED.name, vec_bytes)
             self._completed_semantic_tasks["image"] += 1
             if (
@@ -675,7 +682,11 @@ class AiRuntime(QObject):
                 )
             ):
                 self.semantic_index_changed.emit()
-        elif self.semantic_search_enabled and self.image_semantic_enabled:
+        elif (
+            (not source_is_current or vec_bytes is None)
+            and self.semantic_search_enabled
+            and self.image_semantic_enabled
+        ):
             self._enqueue_image_embed(clip_id, front=True)
         self._drain_image_embed_backlog()
 

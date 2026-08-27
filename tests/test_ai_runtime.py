@@ -128,6 +128,12 @@ class BlockingImageEmbedder(FakeImageEmbedder):
         return super().encode_image(image_bytes)
 
 
+class FailingImageEmbedder(FakeImageEmbedder):
+    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+        self.calls.append("<image-failed>")
+        raise ValueError("invalid image payload")
+
+
 class ContentAwareBlockingOcrEngine(FakeOcrEngine):
     def __init__(self) -> None:
         super().__init__("")
@@ -527,6 +533,25 @@ def test_image_backlog_refreshes_semantic_results_progressively(qapp, store, set
     assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks, timeout=3)
     assert len(store.get_all_embeddings(models.IMAGE_EMBED.name)) == 17
     assert len(changes) >= 2
+
+
+def test_failed_visual_embedding_does_not_wedge_backlog(qapp, store, settings):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    runtime._image_embedder = FailingImageEmbedder()
+    first = store.add("image", {"image/png": PNG_1X1})
+    second = store.add("image", {"image/png": PNG_1X1_RED})
+
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks and not runtime._image_embed_backlog,
+    )
+    assert store.get_all_embeddings(models.IMAGE_EMBED.name) == []
+    assert set(store.clips_missing_image_embedding(models.IMAGE_EMBED.name)) == {
+        first,
+        second,
+    }
 
 
 def test_large_backlogs_keep_only_one_payload_per_ai_kind_in_qt_pool(
