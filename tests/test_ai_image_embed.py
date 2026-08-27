@@ -17,8 +17,9 @@ def test_l2_normalize_returns_unit_float32_vector():
     assert result.tolist() == pytest.approx([0.6, 0.8])
 
 
-def test_visual_query_preserves_natural_multilingual_retrieval_text():
-    assert visual_query_text("  Лошадь Качок  ") == "Лошадь Качок"
+def test_visual_query_matches_siglip2_lowercase_training_preprocessing():
+    assert visual_query_text("  Лошадь Качок  ") == "лошадь качок"
+    assert visual_query_text("HORSE") == visual_query_text("horse")
 
 
 def test_siglip_image_preprocessing_is_rgb_chw_and_normalized():

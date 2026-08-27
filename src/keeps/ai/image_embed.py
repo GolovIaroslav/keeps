@@ -14,8 +14,8 @@ TEXT_LENGTH = 64
 
 
 def visual_query_text(text: str) -> str:
-    """Preserve natural retrieval text, including multilingual casing/content."""
-    return text.strip()
+    """Apply SigLIP2's training-time text normalization."""
+    return text.strip().lower()
 
 
 def l2_normalize(vector):

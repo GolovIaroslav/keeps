@@ -232,6 +232,9 @@ class ClipListModel(QAbstractListModel):
             self._ai_runtime.encode_query_async(
                 self._current_query, self._on_semantic_scores
             )
+        elif self._semantic_scores:
+            self._semantic_scores = {}
+            self._rebuild()
 
     def set_scope(self, scope: str) -> None:
         self._scope = scope

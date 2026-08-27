@@ -12,24 +12,40 @@ from enum import Enum
 from keeps.store import Clip
 
 DEFAULT_THRESHOLD = 0.35
+IMAGE_THRESHOLD = 0.06
 DEFAULT_TOP_N = 20
 RRF_K = 60
 
 
 def reciprocal_rank_fusion(
-    score_sets: list[dict[int, float]], top_n: int = DEFAULT_TOP_N
+    score_sets: list[dict[int, float]],
+    top_n: int | None = None,
+    thresholds: list[float] | None = None,
 ) -> dict[int, float]:
     """Fuse independent embedding spaces by rank, never by raw cosine value.
 
     Granite and SigLIP2 have different cosine distributions. RRF makes the
     first result from either model equally strong and boosts clips found by
     more than one model (for example an image matched by both OCR and vision).
-    Values are normalized so the first result from one model is 1.0 and stay
-    compatible with the existing semantic threshold.
+    Candidate admission happens in each model's native cosine space before
+    rank fusion; otherwise RRF would turn even negative "best available"
+    scores into apparently strong semantic hits. ``thresholds`` therefore
+    has one raw-score threshold per score set. The fused values are normalized
+    so the first admitted result from one model is 1.0.
     """
+    if thresholds is None:
+        thresholds = [DEFAULT_THRESHOLD] * len(score_sets)
+    if len(thresholds) != len(score_sets):
+        raise ValueError("one semantic threshold is required per score set")
+
     fused: dict[int, float] = {}
-    for scores in score_sets:
-        ranked = sorted(scores, key=lambda clip_id: (-scores[clip_id], clip_id))[:top_n]
+    for scores, threshold in zip(score_sets, thresholds):
+        ranked = sorted(
+            (clip_id for clip_id, score in scores.items() if score >= threshold),
+            key=lambda clip_id: (-scores[clip_id], clip_id),
+        )
+        if top_n is not None:
+            ranked = ranked[:top_n]
         for rank, clip_id in enumerate(ranked, start=1):
             fused[clip_id] = fused.get(clip_id, 0.0) + 1.0 / (RRF_K + rank)
     scale = RRF_K + 1
@@ -54,11 +70,15 @@ def _semantic_candidates(
     top_n: int,
 ) -> list[Clip]:
     ranked_ids = sorted(
-        (clip_id for clip_id, score in semantic_scores.items() if score >= threshold),
+        (
+            clip_id
+            for clip_id, score in semantic_scores.items()
+            if score >= threshold and clip_id in clips_by_id
+        ),
         key=lambda clip_id: semantic_scores[clip_id],
         reverse=True,
     )
-    return [clips_by_id[clip_id] for clip_id in ranked_ids[:top_n] if clip_id in clips_by_id]
+    return [clips_by_id[clip_id] for clip_id in ranked_ids[:top_n]]
 
 
 def blend(

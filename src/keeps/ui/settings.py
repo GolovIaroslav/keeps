@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from keeps import __version__, autostart, config, desktop_apps, diagnostics, multi_paste, paste
-from keeps.ai import download, models, ranking
+from keeps.ai import download, models
 from keeps.ai.runtime import AiRuntime
 from keeps.hotkey.buffers import CopyBufferHotkeyManager
 from keeps.hotkey.clips import ClipGlobalHotkeyManager
@@ -878,19 +878,13 @@ class SettingsDialog(QDialog):
         self._save("ai/rag_text_enabled", checked)
         if self._ai_runtime is None:
             return
-        if checked:
-            self._ai_runtime.run_text_embed_backlog_sweep()
-        elif not self._ai_runtime.image_semantic_enabled:
-            self._ai_runtime.set_search_mode(ranking.SearchMode.KEYWORD)
+        self._ai_runtime.semantic_capabilities_changed()
 
     def _on_image_semantic_toggled(self, checked: bool) -> None:
         self._save("ai/image_semantic_enabled", checked)
         if self._ai_runtime is None:
             return
-        if checked:
-            self._ai_runtime.run_image_embed_backlog_sweep()
-        elif not self._ai_runtime.rag_text_enabled:
-            self._ai_runtime.set_search_mode(ranking.SearchMode.KEYWORD)
+        self._ai_runtime.semantic_capabilities_changed()
 
     def _build_model_section(
         self,

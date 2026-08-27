@@ -15,7 +15,12 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from keeps import config
 from keeps.ai import models
-from keeps.ai.ranking import SearchMode, reciprocal_rank_fusion
+from keeps.ai.ranking import (
+    DEFAULT_THRESHOLD,
+    IMAGE_THRESHOLD,
+    SearchMode,
+    reciprocal_rank_fusion,
+)
 from keeps.store import Store
 
 IDLE_CHECK_INTERVAL_MS = 30_000
@@ -57,6 +62,7 @@ class _QuerySignals(QObject):
     # dict through untouched. Found live: RAG search always returned zero
     # semantic hits despite embeddings existing on disk.
     finished = Signal(str, object)  # (query, {clip_id: cosine_score})
+    done = Signal()
 
 
 class _EncodeQueryTask(QRunnable):
@@ -76,21 +82,36 @@ class _EncodeQueryTask(QRunnable):
         self._is_current = is_current
 
     def run(self) -> None:
-        if not self._is_current():
-            return
-        import numpy as np
-
-        score_sets = []
-        for encode_query, clip_ids_and_vecs in self._encoders_and_vecs:
-            query_vec = encode_query(self._query)
+        try:
             if not self._is_current():
                 return
-            scores = {}
-            for clip_id, vec_bytes in clip_ids_and_vecs:
-                vec = np.frombuffer(vec_bytes, dtype=np.float32)
-                scores[clip_id] = float(np.dot(query_vec, vec))
-            score_sets.append(scores)
-        self._signals.finished.emit(self._query, reciprocal_rank_fusion(score_sets))
+            import numpy as np
+
+            score_sets = []
+            thresholds = []
+            for encode_query, clip_ids_and_vecs, threshold in self._encoders_and_vecs:
+                try:
+                    query_vec = encode_query(self._query)
+                except Exception:
+                    logger.exception("semantic query encoder failed")
+                    if not self._is_current():
+                        return
+                    continue
+                if not self._is_current():
+                    return
+                scores = {}
+                for clip_id, vec_bytes in clip_ids_and_vecs:
+                    vec = np.frombuffer(vec_bytes, dtype=np.float32)
+                    scores[clip_id] = float(np.dot(query_vec, vec))
+                score_sets.append(scores)
+                thresholds.append(threshold)
+            if self._is_current():
+                self._signals.finished.emit(
+                    self._query,
+                    reciprocal_rank_fusion(score_sets, thresholds=thresholds),
+                )
+        finally:
+            self._signals.done.emit()
 
 
 class _TextEmbedSignals(QObject):
@@ -157,7 +178,12 @@ class _TextEmbedTask(QRunnable):
         if not self._is_current():
             self._signals.finished.emit(self._clip_id, self._source_hash, None)
             return
-        vec_bytes = self._embed_fn(self._text)
+        try:
+            vec_bytes = self._embed_fn(self._text)
+        except Exception:
+            logger.exception("text embedding failed for clip %s", self._clip_id)
+            self._signals.finished.emit(self._clip_id, self._source_hash, b"")
+            return
         self._signals.finished.emit(
             self._clip_id,
             self._source_hash,
@@ -166,7 +192,7 @@ class _TextEmbedTask(QRunnable):
 
 
 class _OcrSignals(QObject):
-    finished = Signal(int, str, str, object)  # id, source_hash, ocr_text, optional vec
+    finished = Signal(int, str, object, object)  # id, source_hash, ocr_text | None, vec
 
 
 class _OcrTask(QRunnable):
@@ -188,7 +214,12 @@ class _OcrTask(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        text = self._ocr_engine.extract_text(self._png_bytes)
+        try:
+            text = self._ocr_engine.extract_text(self._png_bytes)
+        except Exception:
+            logger.exception("OCR failed for clip %s", self._clip_id)
+            self._signals.finished.emit(self._clip_id, self._source_hash, None, None)
+            return
         self._signals.finished.emit(self._clip_id, self._source_hash, text, None)
 
 
@@ -232,6 +263,8 @@ class AiRuntime(QObject):
         self._last_activity = 0.0
         self._semantic_generation = 0
         self._query_generation = 0
+        self._query_task_active = False
+        self._pending_query_request = None
         self._completed_semantic_tasks = {"text": 0, "image": 0}
         self._text_embed_backlog: deque[int] = deque()
         self._image_embed_backlog: deque[int] = deque()
@@ -297,12 +330,32 @@ class AiRuntime(QObject):
             return
         self._search_mode = mode
         self._semantic_generation += 1
+        self._query_generation += 1
+        self._pending_query_request = None
         if self.semantic_search_enabled:
             self.run_text_embed_backlog_sweep()
             self.run_image_embed_backlog_sweep()
         else:
             self._text_embed_backlog.clear()
             self._image_embed_backlog.clear()
+
+    def semantic_capabilities_changed(self) -> None:
+        """Invalidate semantic work/results after a RAG or vision toggle."""
+        self._semantic_generation += 1
+        self._query_generation += 1
+        self._pending_query_request = None
+        if not self.rag_text_enabled:
+            self._text_embed_backlog.clear()
+        if not self.image_semantic_enabled:
+            self._image_embed_backlog.clear()
+        if not (self.rag_text_enabled or self.image_semantic_enabled):
+            self.set_search_mode(SearchMode.KEYWORD)
+        elif self.semantic_search_enabled:
+            if self.rag_text_enabled:
+                self.run_text_embed_backlog_sweep()
+            if self.image_semantic_enabled:
+                self.run_image_embed_backlog_sweep()
+        self.semantic_index_changed.emit()
 
     @property
     def ai_task_max_threads(self) -> int:
@@ -413,26 +466,49 @@ class AiRuntime(QObject):
         self._query_generation += 1
         query_generation = self._query_generation
         if not query.strip() or not self.semantic_search_enabled:
+            self._pending_query_request = None
             on_done(query, {})
             return
+        if self._query_task_active:
+            # Keep only the latest lightweight request while one query owns
+            # the serialized AI pool. In particular, do not duplicate every
+            # embedding BLOB on each keystroke while an older query is still
+            # queued/running.
+            self._pending_query_request = (query, on_done, query_generation)
+            return
+        self._start_query(query, on_done, query_generation)
+
+    def _start_query(self, query: str, on_done, query_generation: int) -> None:
         encoders_and_vecs = []
-        if self.rag_text_enabled:
+        if self.rag_text_enabled and (
+            self._text_embedder is not None or models.is_downloaded(models.TEXT_EMBED)
+        ):
             encoders_and_vecs.append(
                 (
                     self._get_text_embedder().encode,
                     self._store.get_all_embeddings(models.TEXT_EMBED.name),
+                    DEFAULT_THRESHOLD,
                 )
             )
-        if self.image_semantic_enabled:
+        if self.image_semantic_enabled and (
+            self._image_embedder is not None or models.is_downloaded(models.IMAGE_EMBED)
+        ):
             encoders_and_vecs.append(
                 (
                     self._get_image_embedder().encode_text,
                     self._store.get_all_embeddings(models.IMAGE_EMBED.name),
+                    IMAGE_THRESHOLD,
                 )
             )
+        if not encoders_and_vecs:
+            on_done(query, {})
+            return
         signals = _QuerySignals(self)
         signals.finished.connect(on_done)
+        signals.done.connect(self._on_query_task_done)
+        signals.done.connect(signals.deleteLater)
         generation = self._semantic_generation
+        self._query_task_active = True
         self._ai_pool.start(
             _EncodeQueryTask(
                 query,
@@ -446,6 +522,17 @@ class AiRuntime(QObject):
             )
         )
         self._touch_activity()
+
+    def _on_query_task_done(self) -> None:
+        self._query_task_active = False
+        pending = self._pending_query_request
+        self._pending_query_request = None
+        if pending is None or not self.semantic_search_enabled:
+            return
+        query, on_done, query_generation = pending
+        if query_generation != self._query_generation:
+            return
+        self._start_query(query, on_done, query_generation)
 
     def embed_text(self, text: str) -> bytes:
         """Compute an embedding as float32 bytes, ready for `store.set_embedding`.
@@ -601,7 +688,7 @@ class AiRuntime(QObject):
     ) -> None:
         self._pending_ai_tasks.discard(("text", clip_id))
         source_is_current = self._store.content_hash(clip_id) == source_hash
-        if vec_bytes is not None and source_is_current:
+        if vec_bytes and source_is_current:
             self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
             self._completed_semantic_tasks["text"] += 1
             if (
@@ -612,7 +699,11 @@ class AiRuntime(QObject):
                 )
             ):
                 self.semantic_index_changed.emit()
-        elif self.semantic_search_enabled and self.rag_text_enabled:
+        elif (
+            (not source_is_current or vec_bytes is None)
+            and self.semantic_search_enabled
+            and self.rag_text_enabled
+        ):
             self._enqueue_text_embed(clip_id, front=True)
         self._drain_text_embed_backlog()
 
@@ -790,7 +881,7 @@ class AiRuntime(QObject):
         self,
         clip_id: int,
         source_hash: str,
-        text: str,
+        text: str | None,
         vec_bytes: bytes | None,
     ) -> None:
         self._pending_ai_tasks.discard(("ocr", clip_id))
@@ -798,6 +889,9 @@ class AiRuntime(QObject):
         if self._store.content_hash(clip_id) != source_hash:
             if self.ocr_enabled:
                 self._enqueue_ocr(clip_id, front=True)
+            self._drain_ocr_backlog()
+            return
+        if text is None:
             self._drain_ocr_backlog()
             return
         self._store.set_ocr_text(clip_id, text)
