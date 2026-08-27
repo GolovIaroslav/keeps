@@ -8,6 +8,8 @@ OUTPUT="${2:-$ROOT/keeps-${VERSION}-x86_64.AppImage}"
 OUTPUT="$(realpath -m "$OUTPUT")"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage}"
 APPIMAGETOOL_SHA256="${APPIMAGETOOL_SHA256:-b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2}"
+APPIMAGE_RUNTIME_URL="${APPIMAGE_RUNTIME_URL:-https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64}"
+APPIMAGE_RUNTIME_SHA256="${APPIMAGE_RUNTIME_SHA256:-66f5b22f035022b8bdebb54c066aa6edc7b5db282fe6cdb372e7965f80772557}"
 
 if ! command -v uv >/dev/null 2>&1; then
     printf '%s\n' "error: uv is required to install the portable Python runtime" >&2
@@ -106,6 +108,14 @@ if [ -z "$TOOL" ]; then
 fi
 printf '%s  %s\n' "$APPIMAGETOOL_SHA256" "$TOOL" | sha256sum --check --status
 
+RUNTIME="${APPIMAGE_RUNTIME:-$ROOT/packaging/runtime-x86_64}"
+if [ ! -f "$RUNTIME" ]; then
+    RUNTIME="$BUILD_TMP/runtime-x86_64"
+    curl -fsSL -o "$RUNTIME" "$APPIMAGE_RUNTIME_URL"
+fi
+printf '%s  %s\n' "$APPIMAGE_RUNTIME_SHA256" "$RUNTIME" | sha256sum --check --status
+chmod +x "$RUNTIME"
+
 # mksquashfs defaults to one thread per core; against a ~1GB AppDir that can
 # starve a busy desktop machine (observed locally: silent build death under
 # load). Set MKSQUASHFS_PROCESSORS=2 for local builds; CI runs unthrottled.
@@ -113,7 +123,20 @@ TOOL_ARGS=()
 if [ -n "${MKSQUASHFS_PROCESSORS:-}" ]; then
     TOOL_ARGS+=(--mksquashfs-opt -processors --mksquashfs-opt "$MKSQUASHFS_PROCESSORS")
 fi
-ARCH=x86_64 "$TOOL" --appimage-extract-and-run "${TOOL_ARGS[@]}" "$APPDIR" "$OUTPUT"
+(cd "$BUILD_TMP" && env APPIMAGELAUNCHER_DISABLE=1 "$TOOL" --appimage-extract >/dev/null)
+ARCH=x86_64 env APPIMAGELAUNCHER_DISABLE=1 "$BUILD_TMP/squashfs-root/AppRun" \
+    --runtime-file "$RUNTIME" "${TOOL_ARGS[@]}" "$APPDIR" "$OUTPUT"
+
+# appimagetool writes the final 16-byte MD5 digest into the runtime's pinned
+# `.digest_md5` section. Apart from that documented mutable field, the emitted
+# ELF prefix must be byte-for-byte the runtime we supplied.
+python3 -c "
+with open('$OUTPUT', 'rb') as out, open('$RUNTIME', 'rb') as rt:
+    rt_bytes = rt.read()
+    out_bytes = out.read(len(rt_bytes))
+    changed = [i for i, pair in enumerate(zip(out_bytes, rt_bytes)) if pair[0] != pair[1]]
+    assert changed == list(range(181119, 181135)), 'appimagetool embedded an unexpected runtime'
+"
 
 # Test the *packed* filesystem, rather than only AppDir.  This catches a
 # broken runtime copy (notably a virtualenv without its standard library) and
@@ -122,7 +145,7 @@ VERIFY_DIR="$BUILD_TMP/verify-appimage"
 mkdir -p "$VERIFY_DIR"
 (
     cd "$VERIFY_DIR"
-    "$OUTPUT" --appimage-extract >/dev/null
+    APPIMAGELAUNCHER_DISABLE=1 "$OUTPUT" --appimage-extract >/dev/null
     test -f squashfs-root/usr/python312/lib/python3.12/encodings/__init__.py
     PYTHONHOME=/nonexistent-python-home PYTHONPATH=/nonexistent-python-path \
         squashfs-root/AppRun --version | grep -Fx "$VERSION" >/dev/null
