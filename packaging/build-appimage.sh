@@ -46,6 +46,24 @@ uv pip sync --python "$PYTHON" --system --break-system-packages "$BUILD_TMP/requ
 uv pip install --python "$PYTHON" --system --break-system-packages --no-deps "$ROOT"
 "$PYTHON" -I -c "import keeps, PySide6, onnxruntime, cv2, numpy, tokenizers; print('all dependencies import from the AppDir copy')"
 
+# Legacy clipboard bytes without a declared charset are genuinely ambiguous.
+# Keeps uses libuchardet rather than a home-grown language heuristic. Bundle
+# the small native library so the AppImage behaves the same on clean systems;
+# source installs may still run without it and keep exact UTF/charset paths.
+UCHARDET_LIBRARY="${UCHARDET_LIBRARY:-}"
+if [ -z "$UCHARDET_LIBRARY" ]; then
+    UCHARDET_LIBRARY="$(
+        ldconfig -p 2>/dev/null |
+            awk '$1 == "libuchardet.so.0" && !found { print $NF; found = 1 }'
+    )"
+fi
+if [ -z "$UCHARDET_LIBRARY" ] || [ ! -f "$UCHARDET_LIBRARY" ]; then
+    printf '%s\n' "error: libuchardet.so.0 is required to build the portable AppImage" >&2
+    exit 1
+fi
+mkdir -p "$APPDIR/usr/lib"
+cp -aL "$UCHARDET_LIBRARY" "$APPDIR/usr/lib/libuchardet.so.0"
+
 # PySide6 wheels bundle Qt itself but intentionally rely on several ordinary
 # desktop libraries from the build host (GLib, fontconfig, DBus, X11/Wayland,
 # and friends).  An AppImage must bring those non-driver libraries along: a
@@ -71,7 +89,10 @@ bundle_system_libraries() {
         cp -a "$real_library" "$bundle_dir/$(basename "$real_library")"
         ln -sfn "$(basename "$real_library")" "$bundle_dir/$soname"
     done < <(
-        find "$APPDIR/usr/python312" -type f \( -name '*.so' -o -name '*.so.*' \) -print0 |
+        {
+            find "$APPDIR/usr/python312" -type f \( -name '*.so' -o -name '*.so.*' \) -print0
+            printf '%s\0' "$APPDIR/usr/lib/libuchardet.so.0"
+        } |
             while IFS= read -r -d '' library; do
                 ldd "$library" 2>/dev/null |
                     awk '/=> \/[^ ]+/ { print $1, $3 }'
@@ -81,6 +102,11 @@ bundle_system_libraries() {
 }
 
 bundle_system_libraries
+LD_LIBRARY_PATH="$APPDIR/usr/lib" "$PYTHON" -I -c "
+from keeps.text_encoding import normalize_plain_text
+assert normalize_plain_text('Привет мир'.encode('cp1251')).decode() == 'Привет мир'
+print('legacy charset detector loads from the AppImage copy')
+"
 
 cat > "$APPDIR/AppRun" <<'EOF'
 #!/bin/sh
@@ -127,16 +153,51 @@ fi
 ARCH=x86_64 env APPIMAGELAUNCHER_DISABLE=1 "$BUILD_TMP/squashfs-root/AppRun" \
     --runtime-file "$RUNTIME" "${TOOL_ARGS[@]}" "$APPDIR" "$OUTPUT"
 
-# appimagetool writes the final 16-byte MD5 digest into the runtime's pinned
-# `.digest_md5` section. Apart from that documented mutable field, the emitted
-# ELF prefix must be byte-for-byte the runtime we supplied.
-python3 -c "
-with open('$OUTPUT', 'rb') as out, open('$RUNTIME', 'rb') as rt:
-    rt_bytes = rt.read()
-    out_bytes = out.read(len(rt_bytes))
-    changed = [i for i, pair in enumerate(zip(out_bytes, rt_bytes)) if pair[0] != pair[1]]
-    assert changed == list(range(181119, 181135)), 'appimagetool embedded an unexpected runtime'
-"
+# appimagetool writes the final MD5 digest into the runtime's `.digest_md5`
+# ELF section. Apart from that documented mutable field, the emitted ELF
+# prefix must be byte-for-byte the runtime we supplied. Locate the section
+# from the ELF table instead of assuming one particular runtime's offsets.
+python3 - "$OUTPUT" "$RUNTIME" <<'PY'
+import struct
+import sys
+
+output_path, runtime_path = sys.argv[1:]
+with open(runtime_path, "rb") as stream:
+    runtime = stream.read()
+with open(output_path, "rb") as stream:
+    output_prefix = stream.read(len(runtime))
+
+assert runtime[:4] == b"\x7fELF", "AppImage runtime is not ELF"
+assert runtime[4:6] == b"\x02\x01", "AppImage runtime must be little-endian ELF64"
+section_offset = struct.unpack_from("<Q", runtime, 0x28)[0]
+section_size = struct.unpack_from("<H", runtime, 0x3A)[0]
+section_count = struct.unpack_from("<H", runtime, 0x3C)[0]
+names_index = struct.unpack_from("<H", runtime, 0x3E)[0]
+assert section_size >= 64 and section_count and names_index < section_count
+
+def section(index):
+    offset = section_offset + index * section_size
+    return struct.unpack_from("<IIQQQQIIQQ", runtime, offset)
+
+names_header = section(names_index)
+names = runtime[names_header[4] : names_header[4] + names_header[5]]
+digest_range = None
+for index in range(section_count):
+    header = section(index)
+    name_offset = header[0]
+    name = names[name_offset : names.find(b"\0", name_offset)].decode("ascii")
+    if name == ".digest_md5":
+        digest_range = range(header[4], header[4] + header[5])
+        break
+
+assert digest_range is not None, "AppImage runtime has no .digest_md5 section"
+assert len(output_prefix) == len(runtime), "AppImage output is shorter than its runtime"
+digest_start, digest_stop = digest_range.start, digest_range.stop
+assert (
+    output_prefix[:digest_start] == runtime[:digest_start]
+    and output_prefix[digest_stop:] == runtime[digest_stop:]
+), "appimagetool embedded an unexpected runtime"
+PY
 
 # Test the *packed* filesystem, rather than only AppDir.  This catches a
 # broken runtime copy (notably a virtualenv without its standard library) and
