@@ -1,10 +1,14 @@
 """Tests for text_encoding: Slovak characters, multi-language support, escapes, and fallbacks."""
 
+import os
 import unicodedata
+
+import pytest
 
 from keeps.text_encoding import (
     decode_bytes_smart,
     decode_unicode_escapes,
+    decode_x11_compound_text,
     normalize_plain_text,
 )
 
@@ -55,14 +59,10 @@ def test_unicode_surrogate_pairs():
     assert decode_unicode_escapes(escaped) == "Rocket: 🚀, Face: 😀"
 
 
-def test_html_numeric_decimal_entities():
-    entity_text = "Po&#269;&#237;ta&#269; a &#318;udsk&#225; interakcia"
-    assert decode_unicode_escapes(entity_text) == "Počítač a ľudská interakcia"
-
-
-def test_html_numeric_hex_entities():
-    entity_text = "Anal&#x00fd;za a zlo&#x017e;itos&#x0165;"
-    assert decode_unicode_escapes(entity_text) == "Analýza a zložitosť"
+def test_plain_text_numeric_html_entities_are_preserved_literally():
+    text = 'const x = "&#123;"; Po&#269; &#x010d;'
+    assert decode_unicode_escapes(text) == text
+    assert normalize_plain_text(text.encode()) == text.encode()
 
 
 def test_russian_cyrillic_utf8():
@@ -77,9 +77,12 @@ def test_russian_cp1251_fallback():
 
 
 def test_x11_compound_text_cyrillic():
-    # ISO-8859-5 with \x1b-L prefix (standard X11 compound text)
+    if not os.environ.get("DISPLAY"):
+        pytest.skip("X11 display is required for the native COMPOUND_TEXT converter")
+    # ISO-8859-5 with \x1b-L prefix is a valid COMPOUND_TEXT payload.
     compound = b"\x1b-L" + "Привет мир".encode("iso-8859-5")
-    assert normalize_plain_text(compound).decode("utf-8") == "Привет мир"
+    assert decode_x11_compound_text(compound) == "Привет мир"
+    assert normalize_plain_text(compound, "x11-compound-text").decode() == "Привет мир"
 
 
 def test_german_special_characters():
@@ -132,6 +135,41 @@ def test_cjk_and_arabic_utf8():
 
     for phrase in (chinese, japanese, korean, arabic):
         assert normalize_plain_text(phrase.encode("utf-8")).decode("utf-8") == phrase
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text"),
+    [
+        ("cp1252", "Price £12.50 — “quoted”"),
+        ("cp1252", "Guten Tag, schöne Grüße aus München! ÄÖÜ äöü ß"),
+        ("cp1250", "Příliš žluťoučký kůň úpěl ďábelské ódy."),
+        ("cp1250", "Zażółć gęślą jaźń. ĄĆĘŁŃÓŚŹŻ"),
+        ("cp1251", "Съешь ещё этих мягких французских булок"),
+        ("koi8-r", "Съешь ещё этих мягких французских булок"),
+        ("cp1253", "Καλημέρα κόσμε"),
+        ("cp1254", "İstanbul, Türkçe, ğ, ı, ş, Ğ, İ, Ş"),
+        ("cp1256", "مرحبا بالعالم"),
+        ("gb18030", "你好世界，人工智能剪贴板"),
+        ("shift_jis", "こんにちは世界、クリップボード"),
+        ("euc-kr", "안녕하세요 세계, 클립보드"),
+    ],
+)
+def test_unlabelled_legacy_encoding_detection(encoding, text):
+    assert normalize_plain_text(text.encode(encoding)).decode("utf-8") == text
+
+
+def test_windows_latin_detector_choice_beats_cross_codepage_heuristic(monkeypatch):
+    # 0xDE/0xFE are Romanian T-comma/cedilla characters in CP1250 but
+    # Turkish S-cedilla in CP1254. If uchardet has already identified CP1250,
+    # the ambiguity heuristic must not override that explicit detector result.
+    import keeps.text_encoding as text_encoding
+
+    raw = bytes.fromhex("defe")
+    monkeypatch.setattr(
+        text_encoding, "_detect_legacy_encoding", lambda _data: "WINDOWS-1250"
+    )
+
+    assert decode_bytes_smart(raw) == raw.decode("cp1250")
 
 
 def test_bom_handling():

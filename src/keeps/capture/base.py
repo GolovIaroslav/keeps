@@ -36,6 +36,7 @@ PLAIN_MIME_CANDIDATES = (
     "text/plain",
     "TEXT",
     "STRING",
+    "COMPOUND_TEXT",
 )
 
 _CHARSET_RE = re.compile(
@@ -92,7 +93,7 @@ def find_plain_text_mime(available: set[str]) -> str | None:
         if mime.lower().startswith("text/plain") and _CHARSET_RE.search(mime):
             return mime
 
-    for candidate in (MIME_PLAIN, "TEXT", "STRING"):
+    for candidate in (MIME_PLAIN, "TEXT", "STRING", "COMPOUND_TEXT"):
         if candidate in available:
             return candidate
 
@@ -116,6 +117,8 @@ def _plain_text_encoding_hint(mime: str) -> str | None:
         return "utf-8"
     if mime == "STRING":
         return "iso-8859-1"
+    if mime == "COMPOUND_TEXT":
+        return "x11-compound-text"
     match = _CHARSET_RE.search(mime)
     return match.group(1) if match is not None else None
 

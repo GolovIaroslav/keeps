@@ -17,6 +17,7 @@ DETECT_CASES = [
     ({MIME_PLAIN}, "text"),
     ({"text/plain;charset=utf-8"}, "text"),
     ({"UTF8_STRING"}, "text"),
+    ({"COMPOUND_TEXT"}, "text"),
     ({"text/plain;charset=utf-8", "STRING"}, "text"),
     ({MIME_PLAIN, MIME_HTML}, "html"),
     ({MIME_URI_LIST, MIME_PLAIN}, "files"),
@@ -297,6 +298,18 @@ def test_build_bundle_prefers_utf8_plain_mime():
     assert bundle == {MIME_PLAIN: "Princípy informačných systémov".encode()}
 
 
+def test_plain_text_prefers_qt_canonical_text_over_compound_text():
+    reads = []
+
+    result = build_bundle(
+        {MIME_PLAIN, "COMPOUND_TEXT"},
+        lambda mime: reads.append(mime) or b"canonical text",
+    )
+
+    assert result == ("text", {MIME_PLAIN: b"canonical text"})
+    assert reads == [MIME_PLAIN]
+
+
 def test_build_bundle_honors_declared_plain_text_charset():
     mime = "text/plain;charset=windows-1252"
     text = "Price £12.50 — “quoted”"
@@ -346,3 +359,12 @@ def test_build_bundle_html_fallback_ignores_meta_and_nested_head_content():
     kind, bundle = result
     assert kind == "html"
     assert bundle[MIME_PLAIN] == b"Visible body"
+
+
+def test_build_bundle_html_fallback_decodes_numeric_character_references():
+    html = b"<p>Po&#269;&#237;ta&#269;</p>"
+
+    result = build_bundle({MIME_HTML}, lambda _mime: html)
+
+    assert result is not None
+    assert result[1][MIME_PLAIN] == "Počítač".encode()

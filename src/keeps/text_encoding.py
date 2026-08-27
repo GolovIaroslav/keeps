@@ -2,48 +2,39 @@
 
 from __future__ import annotations
 
+import ctypes
 import re
 import unicodedata
+from functools import cache
 
 _UNICODE_4HEX_RE = re.compile(r"(?<!\\)\\u([0-9a-fA-F]{4})")
 _UNICODE_8HEX_RE = re.compile(r"(?<!\\)\\U([0-9a-fA-F]{8})")
-_NUMERIC_ENTITY_RE = re.compile(r"&#(?:(\d+)|x([0-9a-fA-F]+));")
 
-_COMPOUND_TEXT_ENCODINGS = {
-    b"\x1b-A": "iso-8859-1",
-    b"\x1b-B": "iso-8859-2",
-    b"\x1b-C": "iso-8859-3",
-    b"\x1b-D": "iso-8859-4",
-    b"\x1b-L": "iso-8859-5",
-    b"\x1b-G": "iso-8859-7",
-    b"\x1b-H": "iso-8859-8",
-    b"\x1b-M": "iso-8859-9",
+_ISO_WITH_WINDOWS_C1 = {
+    "ISO-8859-1": "cp1252",
+    "ISO-8859-2": "cp1250",
+    "ISO-8859-7": "cp1253",
+    "ISO-8859-9": "cp1254",
 }
+_WINDOWS_LATIN_ENCODINGS = {
+    "WINDOWS-1250": "cp1250",
+    "WINDOWS-1252": "cp1252",
+    "WINDOWS-1254": "cp1254",
+}
+_TURKISH_DISTINCTIVE = frozenset("ĞğİıŞş")
 
-# Candidate encodings when UTF-8 decoding fails
-_FALLBACK_ENCODINGS = (
-    "cp1250",  # Central / Eastern European: Slovak, Czech, Polish, Hungarian, etc.
-    "cp1252",  # Western European: German, French, Spanish, Italian, Portuguese
-    "iso-8859-2",  # Latin-2
-    "cp1251",  # Cyrillic: Russian, Ukrainian, Belarusian, Bulgarian, Serbian
-    "cp1253",  # Greek
-    "iso-8859-15",  # Latin-9
-    "iso-8859-1",  # Latin-1
-    "cp1254",  # Turkish
-    "cp1256",  # Arabic
-    "koi8-r",  # Russian Cyrillic
-    "iso-8859-5",  # Cyrillic
-    "gb18030",  # Chinese
-    "shift_jis",  # Japanese
-    "euc-kr",  # Korean
-)
 
-_CYRILLIC_VOWELS = frozenset("аеёиоуыэюяАЕЁИОУЫЭЮЯ")
-_GREEK_VOWELS = frozenset("αεηιουωάέήίόύώΑΕΗΙΟΥΩΆΈΉΊΌΎΏ")
+class _XTextProperty(ctypes.Structure):
+    _fields_ = [
+        ("value", ctypes.POINTER(ctypes.c_ubyte)),
+        ("encoding", ctypes.c_ulong),
+        ("format", ctypes.c_int),
+        ("nitems", ctypes.c_ulong),
+    ]
 
 
 def decode_unicode_escapes(text: str) -> str:
-    """Decode literal JSON-style ``\\uXXXX`` and ``\\UXXXXXXXX`` escapes and HTML entities."""
+    """Decode literal JSON-style ``\\uXXXX`` and ``\\UXXXXXXXX`` escapes."""
     # 1. Decode \UXXXXXXXX (8 hex digits, e.g. \U0000010D for č or \U0001F600 for emojis)
     def _replace_8hex(match: re.Match[str]) -> str:
         try:
@@ -88,113 +79,166 @@ def decode_unicode_escapes(text: str) -> str:
         position = end
 
     result.append(text[position:])
-    text = "".join(result)
+    return "".join(result)
 
-    # 3. Decode numeric character references (&#269;, &#x010d;)
-    def _replace_entity(match: re.Match[str]) -> str:
+
+@cache
+def _load_uchardet():
+    """Load the tiny native detector when available (bundled in the AppImage)."""
+    try:
+        library = ctypes.CDLL("libuchardet.so.0")
+    except OSError:
+        return None
+    library.uchardet_new.restype = ctypes.c_void_p
+    library.uchardet_delete.argtypes = [ctypes.c_void_p]
+    library.uchardet_handle_data.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    library.uchardet_handle_data.restype = ctypes.c_int
+    library.uchardet_data_end.argtypes = [ctypes.c_void_p]
+    library.uchardet_get_charset.argtypes = [ctypes.c_void_p]
+    library.uchardet_get_charset.restype = ctypes.c_char_p
+    return library
+
+
+@cache
+def _load_x11():
+    try:
+        library = ctypes.CDLL("libX11.so.6")
+    except OSError:
+        return None
+    library.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    library.XOpenDisplay.restype = ctypes.c_void_p
+    library.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    library.XInternAtom.restype = ctypes.c_ulong
+    library.Xutf8TextPropertyToTextList.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_XTextProperty),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p)),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    library.Xutf8TextPropertyToTextList.restype = ctypes.c_int
+    library.XFreeStringList.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+    library.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    return library
+
+
+def decode_x11_compound_text(data: bytes) -> str | None:
+    """Decode X11 COMPOUND_TEXT with Xlib's standards-compliant converter."""
+    library = _load_x11()
+    if library is None:
+        return None
+    display = library.XOpenDisplay(None)
+    if not display:
+        return None
+    strings = ctypes.POINTER(ctypes.c_char_p)()
+    try:
+        atom = library.XInternAtom(display, b"COMPOUND_TEXT", 0)
+        if not atom:
+            return None
+        buffer = ctypes.create_string_buffer(data)
+        prop = _XTextProperty(
+            ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)), atom, 8, len(data)
+        )
+        count = ctypes.c_int()
+        status = library.Xutf8TextPropertyToTextList(
+            display, ctypes.byref(prop), ctypes.byref(strings), ctypes.byref(count)
+        )
+        if status != 0 or not strings:
+            return None
+        return "\n".join(strings[index].decode("utf-8") for index in range(count.value))
+    except UnicodeDecodeError:
+        return None
+    finally:
+        if strings:
+            library.XFreeStringList(strings)
+        library.XCloseDisplay(display)
+
+
+def _detect_legacy_encoding(data: bytes) -> str | None:
+    library = _load_uchardet()
+    if library is None:
+        return None
+    detector = library.uchardet_new()
+    if not detector:
+        return None
+    try:
+        if library.uchardet_handle_data(detector, data, len(data)) != 0:
+            return None
+        library.uchardet_data_end(detector)
+        detected = library.uchardet_get_charset(detector)
+        return detected.decode("ascii") if detected else None
+    finally:
+        library.uchardet_delete(detector)
+
+
+def _decode_detected_legacy(data: bytes, encoding: str) -> str | None:
+    try:
+        text = data.decode(encoding)
+    except (LookupError, UnicodeDecodeError):
+        return None
+
+    # uchardet can report the ISO sibling for short Windows-codepage text.
+    # C1 control characters are not printable prose, while the same 0x80-0x9f
+    # bytes carry punctuation/letters in the Windows variants. Prefer that
+    # deterministic interpretation only when the ISO decode actually exposes
+    # C1 controls; otherwise the ISO and Windows decodes are equivalent enough
+    # to keep the detector's answer.
+    windows_encoding = _ISO_WITH_WINDOWS_C1.get(encoding.upper())
+    if windows_encoding and any("\x80" <= char <= "\x9f" for char in text):
         try:
-            if match.group(1):
-                cp = int(match.group(1), 10)
-            else:
-                cp = int(match.group(2), 16)
-            if 0 <= cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
-                return chr(cp)
-        except (ValueError, OverflowError):
+            windows_text = data.decode(windows_encoding)
+        except UnicodeDecodeError:
             pass
-        return match.group(0)
-
-    text = _NUMERIC_ENTITY_RE.sub(_replace_entity, text)
+        else:
+            if not any("\x80" <= char <= "\x9f" for char in windows_text):
+                return windows_text
     return text
 
 
-def _evaluate_candidate_text(text: str, enc: str) -> float:
-    if not text:
-        return 0.0
-
-    score = 0.0
-    scripts = {"LATIN": 0, "CYRILLIC": 0, "GREEK": 0, "ARABIC": 0, "OTHER": 0}
-    cyrillic_vowels = 0
-    greek_vowels = 0
-
-    for ch in text:
-        if ch in "\r\n\t":
-            score += 1.0
+def _decode_windows_latin(data: bytes, detected: str | None) -> str | None:
+    """Resolve the narrow CP1250/1252/1254 ambiguity without global guessing."""
+    candidates: dict[str, str] = {}
+    for encoding in ("cp1250", "cp1252", "cp1254"):
+        try:
+            candidates[encoding] = data.decode(encoding)
+        except UnicodeDecodeError:
             continue
-        if ch.isalpha():
-            name = unicodedata.name(ch, "")
-            if name.startswith("LATIN"):
-                scripts["LATIN"] += 1
-            elif name.startswith("CYRILLIC"):
-                scripts["CYRILLIC"] += 1
-                if ch in _CYRILLIC_VOWELS:
-                    cyrillic_vowels += 1
-            elif name.startswith("GREEK"):
-                scripts["GREEK"] += 1
-                if ch in _GREEK_VOWELS:
-                    greek_vowels += 1
-            elif name.startswith("ARABIC"):
-                scripts["ARABIC"] += 1
-            else:
-                scripts["OTHER"] += 1
-            score += 2.0
-        elif unicodedata.category(ch).startswith(("P", "N", "Z")):
-            score += 1.0
-        elif unicodedata.category(ch).startswith("C"):
-            score -= 100.0
-        else:
-            score += 0.5
+    if not candidates:
+        return None
 
-    # 1. Heavily penalize mixed scripts
-    active_scripts = [k for k, v in scripts.items() if v > 0]
-    total_letters = sum(scripts.values())
-    if len(active_scripts) > 1 and total_letters >= 3:
-        dominant_count = max(scripts.values())
-        minority_count = total_letters - dominant_count
-        score -= 50.0 * minority_count
+    unique_texts = set(candidates.values())
+    if len(unique_texts) == 1:
+        return next(iter(unique_texts))
+    if len(candidates) == 1:
+        return next(iter(candidates.values()))
 
-    # 2. Casing sanity: penalize uppercase inside or at the end of lowercase words (e.g. fooЮ)
-    for word in re.findall(r"\b\w+\b", text):
-        if len(word) >= 3:
-            if word[:-1].islower() and word[-1].isupper():
-                score -= 30.0
-            for i in range(1, len(word) - 1):
-                if word[i].isupper() and word[i - 1].islower() and word[i + 1].islower():
-                    score -= 20.0
+    detector_choice = _WINDOWS_LATIN_ENCODINGS.get((detected or "").upper())
+    # CP1250 has several byte assignments that can look strongly Turkish when
+    # decoded as CP1254, so a positive Central-European detector result must
+    # win before the Turkish ambiguity heuristic. A real Turkish sample is
+    # commonly misreported by uchardet as WINDOWS-1252, though, so 1252 stays
+    # eligible for the narrow Turkish override below.
+    if detector_choice in {"cp1250", "cp1254"} and detector_choice in candidates:
+        return candidates[detector_choice]
 
-    # 3. Cyrillic vs Greek vowel ratio check
-    if scripts["CYRILLIC"] >= 3:
-        v_ratio = cyrillic_vowels / scripts["CYRILLIC"]
-        if 0.25 <= v_ratio <= 0.60:
-            score += 20.0
-        else:
-            score -= 20.0
-    if scripts["GREEK"] >= 3:
-        v_ratio = greek_vowels / scripts["GREEK"]
-        if 0.25 <= v_ratio <= 0.60:
-            score += 20.0
-        else:
-            score -= 20.0
+    # Turkish-specific bytes can break the CP1252/CP1254 tie when the detector
+    # is absent or says CP1252. Require more than one distinct Turkish
+    # character because a single byte can legitimately be Icelandic/Western.
+    turkish = candidates.get("cp1254")
+    if turkish is not None and len(set(turkish) & _TURKISH_DISTINCTIVE) >= 2:
+        return turkish
 
-    # 4. Spanish inverted punctuation bonus
-    if ("¡" in text and "!" in text) or ("¿" in text and "?" in text):
-        if enc == "cp1252":
-            score += 25.0
+    if detector_choice in candidates:
+        return candidates[detector_choice]
 
-    # 5. Distinctive characters
-    if enc in ("cp1250", "iso-8859-2"):
-        if any(c in text for c in "čďĺľňšťžřůěřąćęłńśźż"):
-            score += 15.0
-        if re.search(r"\b[ŕŔ]\b|j[ŕŔ]", text):
-            score -= 20.0
-
-    if enc in ("cp1252", "iso-8859-15"):
-        if any(c in text for c in "àèêëîïôùûçœæñß"):
-            score += 15.0
-
-    if enc == "cp1254" and any(c in text for c in "ğĞşŞİ"):
-        score += 20.0
-
-    return score
+    # uchardet occasionally calls short Western text an IBM DOS codepage. If
+    # the Windows decoders agree, use their shared Unicode result; otherwise
+    # leave the bytes unresolved rather than inventing a language preference.
+    if detected and detected.upper().startswith("IBM"):
+        western = candidates.get("cp1252")
+        turkish = candidates.get("cp1254")
+        if western is not None and western == turkish:
+            return western
+    return None
 
 
 def decode_bytes_smart(data: bytes, encoding_hint: str | None = None) -> str:
@@ -214,14 +258,21 @@ def decode_bytes_smart(data: bytes, encoding_hint: str | None = None) -> str:
         except UnicodeDecodeError:
             pass
 
-    # 2. An explicit MIME charset is more reliable than statistical guessing.
+    # 2. X11 COMPOUND_TEXT is stateful; let Xlib implement the actual standard
+    # rather than treating only its first escape sequence as one fixed codec.
+    if encoding_hint == "x11-compound-text":
+        compound_text = decode_x11_compound_text(data)
+        if compound_text is not None:
+            return compound_text
+
+    # 3. An explicit MIME charset is more reliable than statistical guessing.
     if encoding_hint:
         try:
             return data.decode(encoding_hint)
         except (LookupError, UnicodeDecodeError):
             pass
 
-    # 3. UTF-8 (strict)
+    # 4. UTF-8 (strict)
     try:
         res = data.decode("utf-8")
         if res.startswith("\ufeff"):
@@ -230,48 +281,40 @@ def decode_bytes_smart(data: bytes, encoding_hint: str | None = None) -> str:
     except UnicodeDecodeError:
         pass
 
-    # 4. UTF-16 without BOM heuristic
+    # 5. UTF-16 without BOM heuristic
     if len(data) >= 4 and len(data) % 2 == 0:
         if data[1::2].count(0) > len(data) // 4:
             try:
                 candidate = data.decode("utf-16-le")
-                if _evaluate_candidate_text(candidate, "utf-16-le") > 0:
+                if candidate.isprintable() or any(char in candidate for char in "\r\n\t"):
                     return candidate
             except UnicodeDecodeError:
                 pass
         if data[0::2].count(0) > len(data) // 4:
             try:
                 candidate = data.decode("utf-16-be")
-                if _evaluate_candidate_text(candidate, "utf-16-be") > 0:
+                if candidate.isprintable() or any(char in candidate for char in "\r\n\t"):
                     return candidate
             except UnicodeDecodeError:
                 pass
 
-    # 5. X11 Compound text
-    for prefix, enc in _COMPOUND_TEXT_ENCODINGS.items():
-        if data.startswith(prefix):
-            try:
-                return data[len(prefix) :].decode(enc)
-            except UnicodeDecodeError:
-                pass
-
-    # 6. Candidate regional encodings with scoring
-    best_text = None
-    best_score = -10000.0
-    for enc in _FALLBACK_ENCODINGS:
-        try:
-            text = data.decode(enc)
-            # Scoring is Python-level character work; cap it so a large
-            # legacy-encoded clipboard item cannot stall capture for seconds.
-            score = _evaluate_candidate_text(text[:8192], enc)
-            if score > best_score:
-                best_score = score
-                best_text = text
-        except UnicodeDecodeError:
-            continue
-
-    if best_text is not None and best_score > 0.0:
-        return best_text
+    # 6. Legacy encodings are genuinely ambiguous without metadata; use a
+    # mature detector rather than a home-grown script/frequency guess. The
+    # AppImage bundles libuchardet; source installs without it still retain
+    # exact UTF/BOM/declared-charset handling above and fail visibly below.
+    detected = _detect_legacy_encoding(data)
+    if detected:
+        if detected.upper() in _WINDOWS_LATIN_ENCODINGS or detected.upper().startswith("IBM"):
+            latin = _decode_windows_latin(data, detected)
+            if latin is not None:
+                return latin
+        decoded = _decode_detected_legacy(data, detected)
+        if decoded is not None:
+            return decoded
+    else:
+        latin = _decode_windows_latin(data, None)
+        if latin is not None:
+            return latin
 
     return data.decode("utf-8", errors="replace")
 
