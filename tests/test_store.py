@@ -339,6 +339,16 @@ def test_update_content_replaces_data_and_preview(store):
     assert store.get_data(clip_id) == {"text/plain": b"after"}
 
 
+def test_update_content_invalidates_stale_text_embedding(store):
+    clip_id = store.add("text", {"text/plain": b"before"})
+    store.set_embedding(clip_id, "text-model", b"vector-for-before")
+
+    store.update_content(clip_id, {"text/plain": b"after"})
+
+    assert store.get_all_embeddings("text-model") == []
+    assert store.clips_missing_embedding("text-model") == [clip_id]
+
+
 def test_update_content_bumps_to_top(store):
     a = store.add("text", {"text/plain": b"a"})
     time.sleep(0.002)
@@ -398,14 +408,34 @@ def test_set_embedding_and_get_all_embeddings(store):
     assert store.get_all_embeddings("other-model") == []
 
 
-def test_set_embedding_overwrites_on_conflict(store):
+def test_set_embedding_keeps_independent_models_for_one_clip(store):
     clip_id = store.add("text", {"text/plain": b"x"})
     store.set_embedding(clip_id, "model-x", b"old-vec")
     store.set_embedding(clip_id, "model-y", b"new-vec")
 
     results = store.get_all_embeddings("model-y")
     assert results == [(clip_id, b"new-vec")]
-    assert store.get_all_embeddings("model-x") == []
+    assert store.get_all_embeddings("model-x") == [(clip_id, b"old-vec")]
+
+
+def test_v6_embedding_migration_preserves_vectors_and_uses_composite_key():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("CREATE TABLE clips (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE embeddings ("
+        "clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE, "
+        "model TEXT NOT NULL, vec BLOB NOT NULL)"
+    )
+    conn.execute("INSERT INTO clips (id) VALUES (1)")
+    conn.execute("INSERT INTO embeddings VALUES (1, 'text-model', X'0102')")
+
+    store_module._migrate_v6_multiple_embeddings(conn)
+    conn.execute("INSERT INTO embeddings VALUES (1, 'image-model', X'0304')")
+
+    assert conn.execute(
+        "SELECT model, vec FROM embeddings ORDER BY model"
+    ).fetchall() == [("image-model", b"\x03\x04"), ("text-model", b"\x01\x02")]
 
 
 def test_clips_missing_ocr_lists_only_image_clips_without_ocr_text(store):
@@ -468,6 +498,34 @@ def test_updating_image_content_invalidates_thumbnail(store):
     assert store.clips_missing_thumbnail() == [clip_id]
 
 
+def test_updating_image_content_invalidates_ocr_and_all_embeddings(store):
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_ocr_text(clip_id, "text from old pixels")
+    store.set_embedding(clip_id, "text-model", b"old-ocr-vector")
+    store.set_embedding(clip_id, "vision-model", b"old-image-vector")
+    edited_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])
+
+    store.update_content(clip_id, {"image/png": edited_png})
+
+    clip = next(clip for clip in store.all() if clip.id == clip_id)
+    assert clip.ocr_text is None
+    assert store.get_all_embeddings("text-model") == []
+    assert store.get_all_embeddings("vision-model") == []
+    assert store.clips_missing_ocr() == [clip_id]
+    assert store.clips_missing_image_embedding("vision-model") == [clip_id]
+
+
+def test_clips_by_ids_hydrates_only_requested_clips_in_requested_order(store):
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+    third = store.add("text", {"text/plain": b"third"})
+
+    clips = store.clips_by_ids([second, 999999, first, second])
+
+    assert [clip.id for clip in clips] == [second, first]
+    assert third not in {clip.id for clip in clips}
+
+
 def test_clips_missing_embedding_lists_only_text_and_html_without_it(store):
     embedded = store.add("text", {"text/plain": b"already embedded"})
     store.set_embedding(embedded, "model-x", b"vec")
@@ -475,6 +533,17 @@ def test_clips_missing_embedding_lists_only_text_and_html_without_it(store):
     store.add("image", {"image/png": PNG_1X1})  # never text-embedded, must be excluded
 
     assert store.clips_missing_embedding("model-x") == [not_embedded]
+
+
+def test_clips_missing_image_embedding_ignores_ocr_and_other_models(store):
+    embedded = store.add("image", {"image/png": PNG_1X1})
+    other_png = PNG_1X1[:-1] + bytes([PNG_1X1[-1] ^ 0xFF])
+    missing = store.add("image", {"image/png": other_png})
+    store.set_ocr_text(missing, "recognized text is unrelated to visual indexing")
+    store.set_embedding(embedded, "vision-model", b"vision")
+    store.set_embedding(missing, "text-model", b"ocr")
+
+    assert store.clips_missing_image_embedding("vision-model") == [missing]
 
 
 def test_add_and_search_5000_records_is_fast(tmp_path):
@@ -747,7 +816,7 @@ def test_clip_hotkey_conflict_excludes_the_clip_being_edited(store):
     assert store.hotkey_conflict("Ctrl+1", exclude_clip_id=second) == first
 
 
-def test_v3_to_v5_hotkey_and_copy_buffer_migration_backs_up_and_preserves_clips(tmp_path):
+def test_v3_to_latest_migration_backs_up_and_preserves_clips(tmp_path):
     db_path = tmp_path / "keeps.db"
     conn = sqlite3.connect(db_path)
     conn.executescript(store_module.SCHEMA)
@@ -769,7 +838,7 @@ def test_v3_to_v5_hotkey_and_copy_buffer_migration_backs_up_and_preserves_clips(
     assert clip.hotkey is None and clip.hotkey_global is False
     assert len(list(tmp_path.glob("keeps.db.backup-*"))) == 1
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store_module.LATEST_VERSION
     columns = {row[1] for row in conn.execute("PRAGMA table_info(clips)")}
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()

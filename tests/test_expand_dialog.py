@@ -155,3 +155,56 @@ store.close()
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_clip_list_content_filter_applies_to_keyword_and_semantic_results(tmp_path):
+    script = r'''
+from pathlib import Path
+from types import SimpleNamespace
+from PySide6.QtWidgets import QApplication
+from keeps.ai.ranking import SearchMode
+from keeps.store import Store
+from keeps.ui.popup import ClipListModel
+
+app = QApplication([])
+store = Store(Path("store.db"))
+text_id = store.add("text", {"text/plain": b"horse notes"})
+image_id = store.add(
+    "image",
+    {"image/png": bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
+        "3df40000000c4944415478da6360606000000004000160b3e1b40000000049"
+        "454e44ae426082"
+    )},
+)
+runtime = SimpleNamespace(
+    rag_text_enabled=True,
+    ocr_enabled=True,
+    search_mode=SearchMode.SEMANTIC,
+    encode_query_async=lambda query, callback: callback(
+        query, {text_id: 0.9, image_id: 0.8}
+    ),
+)
+model = ClipListModel(store, runtime)
+model.set_query("horse")
+assert [model.clip_at(i).id for i in range(model.rowCount())] == [text_id, image_id]
+model.set_content_filter("images")
+assert [model.clip_at(i).id for i in range(model.rowCount())] == [image_id]
+model.set_content_filter("text")
+assert [model.clip_at(i).id for i in range(model.rowCount())] == [text_id]
+store.close()
+'''
+    environment = os.environ | {
+        "QT_QPA_PLATFORM": "offscreen",
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr

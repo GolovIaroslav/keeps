@@ -1,4 +1,4 @@
-from keeps.ai.ranking import SearchMode, blend
+from keeps.ai.ranking import SearchMode, blend, reciprocal_rank_fusion
 from keeps.store import Clip
 
 
@@ -89,3 +89,27 @@ MODE_CYCLE_CASES = [
 def test_mode_next_cycles_in_fixed_order():
     for current, expected in MODE_CYCLE_CASES:
         assert current.next() == expected
+
+
+def test_rank_fusion_does_not_compare_raw_scores_from_different_models():
+    fused = reciprocal_rank_fusion(
+        [
+            {1: 0.91, 2: 0.80},
+            {3: 0.22, 4: 0.21},
+        ]
+    )
+
+    assert fused[1] == fused[3]
+    assert fused[2] == fused[4]
+
+
+def test_rank_fusion_boosts_an_image_found_by_visual_and_ocr_embeddings():
+    fused = reciprocal_rank_fusion(
+        [
+            {1: 0.9, 2: 0.8},
+            {3: 0.3, 2: 0.2},
+        ]
+    )
+
+    assert fused[2] > fused[1]
+    assert fused[2] > fused[3]

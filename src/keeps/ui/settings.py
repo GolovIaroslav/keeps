@@ -806,12 +806,14 @@ class SettingsDialog(QDialog):
         ocr_box.toggled.connect(self._on_ocr_toggled)
         toggles.addRow(self.tr("OCR text from image clips"), ocr_box)
 
-        image_semantic_status = QLabel(
-            self.tr("Image semantic search — experimental, not implemented yet")
+        image_semantic_box = QCheckBox()
+        image_semantic_box.setChecked(
+            bool(config.get(self._settings, "ai/image_semantic_enabled"))
         )
-        image_semantic_status.setEnabled(False)
-        image_semantic_status.setWordWrap(True)
-        toggles.addRow(image_semantic_status)
+        image_semantic_box.toggled.connect(self._on_image_semantic_toggled)
+        toggles.addRow(
+            self.tr("Visual semantic search over image clips"), image_semantic_box
+        )
         layout.addLayout(toggles)
 
         timing = QFormLayout()
@@ -853,9 +855,16 @@ class SettingsDialog(QDialog):
                 )
             )
         layout.addWidget(self._build_ocr_languages_section())
-        layout.addWidget(
-            self._build_model_section(self.tr("Image-semantic search"), None, None, None, None)
-        )
+        if self._ai_runtime is not None:
+            layout.addWidget(
+                self._build_model_section(
+                    self.tr("Image-semantic search"),
+                    (models.IMAGE_EMBED,),
+                    self._ai_runtime.image_embed_status,
+                    self._ai_runtime.load_image_embedder,
+                    self._ai_runtime.unload_image_embedder,
+                )
+            )
 
         layout.addStretch(1)
         return widget
@@ -871,7 +880,16 @@ class SettingsDialog(QDialog):
             return
         if checked:
             self._ai_runtime.run_text_embed_backlog_sweep()
-        else:
+        elif not self._ai_runtime.image_semantic_enabled:
+            self._ai_runtime.set_search_mode(ranking.SearchMode.KEYWORD)
+
+    def _on_image_semantic_toggled(self, checked: bool) -> None:
+        self._save("ai/image_semantic_enabled", checked)
+        if self._ai_runtime is None:
+            return
+        if checked:
+            self._ai_runtime.run_image_embed_backlog_sweep()
+        elif not self._ai_runtime.rag_text_enabled:
             self._ai_runtime.set_search_mode(ranking.SearchMode.KEYWORD)
 
     def _build_model_section(

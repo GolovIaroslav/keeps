@@ -160,6 +160,12 @@ _MODE_ORDER = (
     ranking.SearchMode.SEMANTIC,
 )
 
+_CONTENT_FILTER_LABELS = {
+    "all": "All",
+    "text": "Text",
+    "images": "Images",
+}
+
 
 class ClipListModel(QAbstractListModel):
     def __init__(
@@ -182,6 +188,7 @@ class ClipListModel(QAbstractListModel):
         # self._clips and is looked up by id, never by row index.
         self._pasted_ids: set[int] = set()
         self._scope = "history"
+        self._content_filter = "all"
         if self._ai_runtime is not None and hasattr(
             self._ai_runtime, "semantic_index_changed"
         ):
@@ -215,7 +222,10 @@ class ClipListModel(QAbstractListModel):
     def refresh_semantic_scores(self) -> None:
         if (
             self._ai_runtime is not None
-            and self._ai_runtime.rag_text_enabled
+            and (
+                self._ai_runtime.rag_text_enabled
+                or getattr(self._ai_runtime, "image_semantic_enabled", False)
+            )
             and self._ai_runtime.search_mode != ranking.SearchMode.KEYWORD
             and self._current_query.strip()
         ):
@@ -226,6 +236,19 @@ class ClipListModel(QAbstractListModel):
     def set_scope(self, scope: str) -> None:
         self._scope = scope
         self._rebuild()
+
+    def set_content_filter(self, content_filter: str) -> None:
+        if content_filter not in _CONTENT_FILTER_LABELS:
+            raise ValueError(f"unknown content filter: {content_filter}")
+        self._content_filter = content_filter
+        self._rebuild()
+
+    def _matches_content_filter(self, clip: Clip) -> bool:
+        if self._content_filter == "all":
+            return True
+        if self._content_filter == "text":
+            return clip.kind in ("text", "html")
+        return clip.kind == "image"
 
     def _on_semantic_scores(self, query: str, scores: dict[int, float]) -> None:
         if query != self._current_query:
@@ -240,14 +263,25 @@ class ClipListModel(QAbstractListModel):
                 config.get(self._settings, "popup/keyword_short_first")
             ),
         )
+        substring_clips = [
+            clip for clip in substring_clips if self._matches_content_filter(clip)
+        ]
         rag_active = (
             self._ai_runtime is not None
-            and self._ai_runtime.rag_text_enabled
+            and (
+                self._ai_runtime.rag_text_enabled
+                or getattr(self._ai_runtime, "image_semantic_enabled", False)
+            )
             and self._ai_runtime.search_mode != ranking.SearchMode.KEYWORD
             and bool(self._current_query.strip())
         )
         if rag_active:
-            clips_by_id = {clip.id: clip for clip in self._store.all()}
+            semantic_ids = list(self._semantic_scores)
+            clips_by_id = {
+                clip.id: clip
+                for clip in self._store.clips_by_ids(semantic_ids)
+                if self._matches_content_filter(clip)
+            }
             clips = ranking.blend(
                 substring_clips,
                 self._semantic_scores,
@@ -259,7 +293,9 @@ class ClipListModel(QAbstractListModel):
         clips = self._store.clips_in_scope(self._scope, clips)
 
         ai_badges_active = self._ai_runtime is not None and (
-            self._ai_runtime.rag_text_enabled or self._ai_runtime.ocr_enabled
+            self._ai_runtime.rag_text_enabled
+            or getattr(self._ai_runtime, "image_semantic_enabled", False)
+            or self._ai_runtime.ocr_enabled
         )
         semantic_only = (
             rag_active
@@ -427,6 +463,14 @@ class PopupWindow(QWidget):
             )
         self._mode_combo.currentIndexChanged.connect(self._select_search_mode)
 
+        self._content_filter_combo = QComboBox(self)
+        for content_filter, label in _CONTENT_FILTER_LABELS.items():
+            self._content_filter_combo.addItem(self.tr(label), content_filter)
+        self._content_filter_combo.setToolTip(self.tr("Filter by clip type"))
+        self._content_filter_combo.currentIndexChanged.connect(
+            self._select_content_filter
+        )
+
         self._history_menu = QMenu(self)
         self._history_button = QToolButton(self)
         self._history_button.setText(self.tr("History"))
@@ -465,6 +509,7 @@ class PopupWindow(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
         search_row.addWidget(self._history_button)
+        search_row.addWidget(self._content_filter_combo)
         search_row.addWidget(self._mode_combo)
 
         self._title_bar = _TitleBar(self)
@@ -767,9 +812,15 @@ class PopupWindow(QWidget):
 
     def _update_clip_content(self, clip_id: int, mime_data: dict[str, bytes]) -> int:
         """Edit a clip and immediately release its action if dedup deletes it."""
+        kind = next(clip.kind for clip in self.store.all() if clip.id == clip_id)
         result_id = self.store.update_content(clip_id, mime_data)
         if result_id != clip_id and self._clip_hotkeys is not None:
             self._clip_hotkeys.unregister(clip_id)
+        elif result_id == clip_id and self._ai_runtime is not None:
+            # update_content invalidates embeddings/OCR that described the old
+            # bytes. Re-enter the normal capture pipeline so an active AI mode
+            # immediately indexes the edited content instead of staying stale.
+            self._ai_runtime.on_clip_captured(result_id, kind)
         return result_id
 
     def _prune_thumbnail_cache(self) -> None:
@@ -1562,7 +1613,10 @@ class PopupWindow(QWidget):
         self.search_edit.setFocus()
 
     def _cycle_search_mode(self) -> None:
-        if self._ai_runtime is None or not self._ai_runtime.rag_text_enabled:
+        if self._ai_runtime is None or not (
+            self._ai_runtime.rag_text_enabled
+            or self._ai_runtime.image_semantic_enabled
+        ):
             return  # nothing to switch between when RAG is off (PLAN.md §9)
         self._ai_runtime.set_search_mode(self._ai_runtime.search_mode.next())
         self._update_mode_combo()
@@ -1578,10 +1632,20 @@ class PopupWindow(QWidget):
         self._update_mode_combo()
         self.refresh()
 
+    def _select_content_filter(self, index: int) -> None:
+        if index < 0:
+            return
+        content_filter = self._content_filter_combo.itemData(index)
+        if content_filter is not None:
+            self.model.set_content_filter(str(content_filter))
+
     def _update_mode_combo(self) -> None:
-        rag_on = self._ai_runtime is not None and self._ai_runtime.rag_text_enabled
-        self._mode_combo.setEnabled(rag_on)
-        mode = self._ai_runtime.search_mode if rag_on else ranking.SearchMode.KEYWORD
+        semantic_on = self._ai_runtime is not None and (
+            self._ai_runtime.rag_text_enabled
+            or self._ai_runtime.image_semantic_enabled
+        )
+        self._mode_combo.setEnabled(semantic_on)
+        mode = self._ai_runtime.search_mode if semantic_on else ranking.SearchMode.KEYWORD
         index = self._mode_combo.findData(mode)
         self._mode_combo.blockSignals(True)
         self._mode_combo.setCurrentIndex(index)

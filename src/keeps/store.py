@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from keeps.capture.base import extract_text_from_html
 from keeps.text_encoding import decode_unicode_escapes, normalize_plain_text
 
 if TYPE_CHECKING:
@@ -41,9 +42,10 @@ CREATE TABLE IF NOT EXISTS thumbs (
   png     BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embeddings (
-  clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+  clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
   model   TEXT NOT NULL,
-  vec     BLOB NOT NULL
+  vec     BLOB NOT NULL,
+  PRIMARY KEY (clip_id, model)
 );
 """
 
@@ -53,7 +55,7 @@ PREVIEW_MAX_CHARS = 300
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
 # entries for v2 and beyond.
-LATEST_VERSION = 5
+LATEST_VERSION = 6
 
 
 def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
@@ -101,11 +103,27 @@ def _migrate_v5_copy_buffers(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v6_multiple_embeddings(conn: sqlite3.Connection) -> None:
+    """Allow OCR/text and visual embeddings to coexist for an image clip."""
+    conn.execute(
+        "CREATE TABLE embeddings_v6 ("
+        "clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE, "
+        "model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (clip_id, model))"
+    )
+    conn.execute(
+        "INSERT INTO embeddings_v6 (clip_id, model, vec) "
+        "SELECT clip_id, model, vec FROM embeddings"
+    )
+    conn.execute("DROP TABLE embeddings")
+    conn.execute("ALTER TABLE embeddings_v6 RENAME TO embeddings")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v2_groups,
     3: _migrate_v3_alias,
     4: _migrate_v4_clip_hotkeys,
     5: _migrate_v5_copy_buffers,
+    6: _migrate_v6_multiple_embeddings,
 }
 
 BACKUP_KEEP = 3
@@ -238,7 +256,13 @@ def build_preview(kind: str, mime_data: dict[str, bytes]) -> str:
         text = normalize_plain_text(mime_data["text/plain"]).decode("utf-8")
         return text[:PREVIEW_MAX_CHARS]
     if kind == "html":
-        text = normalize_plain_text(mime_data.get("text/plain", b"")).decode("utf-8")
+        plain_bytes = mime_data.get("text/plain", b"")
+        if plain_bytes:
+            text = normalize_plain_text(plain_bytes).decode("utf-8")
+        elif "text/html" in mime_data:
+            text = extract_text_from_html(mime_data["text/html"])
+        else:
+            text = ""
         return text[:PREVIEW_MAX_CHARS]
     if kind == "image":
         dims = _png_dimensions(mime_data["image/png"])
@@ -519,11 +543,14 @@ class Store:
 
         preview = build_preview(kind, mime_data)
         last_used_at = self._next_usage_timestamps(1)[0]
+        ocr_text = None if kind == "image" else row["ocr_text"]
         self._conn.execute(
-            "UPDATE clips SET preview = ?, hash = ?, last_used_at = ? WHERE id = ?",
-            (preview, new_hash, last_used_at, clip_id),
+            "UPDATE clips SET preview = ?, hash = ?, last_used_at = ?, ocr_text = ? "
+            "WHERE id = ?",
+            (preview, new_hash, last_used_at, ocr_text, clip_id),
         )
         self._conn.execute("DELETE FROM clip_data WHERE clip_id = ?", (clip_id,))
+        self._conn.execute("DELETE FROM embeddings WHERE clip_id = ?", (clip_id,))
         self._conn.executemany(
             "INSERT INTO clip_data (clip_id, mime, data) VALUES (?, ?, ?)",
             [(clip_id, mime, data) for mime, data in mime_data.items()],
@@ -531,9 +558,7 @@ class Store:
         if kind == "image":
             self._conn.execute("DELETE FROM thumbs WHERE clip_id = ?", (clip_id,))
         self._conn.commit()
-        self._search_index.upsert(
-            clip_id, kind, mime_data, row["ocr_text"], row["alias"]
-        )
+        self._search_index.upsert(clip_id, kind, mime_data, ocr_text, row["alias"])
         return clip_id
 
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
@@ -569,6 +594,25 @@ class Store:
             "SELECT * FROM clips ORDER BY last_used_at DESC, id DESC"
         ).fetchall()
         return [self._row_to_clip(row) for row in rows]
+
+    def clips_by_ids(self, clip_ids: list[int]) -> list[Clip]:
+        """Hydrate only requested clips, preserving first requested order."""
+        clip_ids = list(dict.fromkeys(clip_ids))
+        if not clip_ids:
+            return []
+        rows_by_id: dict[int, sqlite3.Row] = {}
+        for start in range(0, len(clip_ids), 900):
+            batch = clip_ids[start : start + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT * FROM clips WHERE id IN ({placeholders})", batch
+            ).fetchall()
+            rows_by_id.update({row["id"]: row for row in rows})
+        return [
+            self._row_to_clip(rows_by_id[clip_id])
+            for clip_id in clip_ids
+            if clip_id in rows_by_id
+        ]
 
     def groups(self) -> list[Group]:
         rows = self._conn.execute(
@@ -678,6 +722,13 @@ class Store:
             else row["data"]
             for row in rows
         }
+
+    def content_hash(self, clip_id: int) -> str | None:
+        """Return the current content hash, or None if the clip was deleted."""
+        row = self._conn.execute(
+            "SELECT hash FROM clips WHERE id = ?", (clip_id,)
+        ).fetchone()
+        return row["hash"] if row is not None else None
 
     @staticmethod
     def _validate_copy_buffer(slot: int, kind: str, mime_data: dict[str, bytes]) -> None:
@@ -851,7 +902,7 @@ class Store:
     def set_embedding(self, clip_id: int, model: str, vec: bytes) -> None:
         self._conn.execute(
             "INSERT INTO embeddings (clip_id, model, vec) VALUES (?, ?, ?) "
-            "ON CONFLICT(clip_id) DO UPDATE SET model = excluded.model, vec = excluded.vec",
+            "ON CONFLICT(clip_id, model) DO UPDATE SET vec = excluded.vec",
             (clip_id, model, vec),
         )
         self._conn.commit()
@@ -919,6 +970,24 @@ class Store:
             (model,),
         ).fetchall()
         return [row["id"] for row in rows]
+
+    def clips_missing_image_embedding(self, model: str) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT c.id FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.kind = 'image' AND e.clip_id IS NULL ORDER BY c.id",
+            (model,),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def clip_needs_image_embedding(self, clip_id: int, model: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.id = ? AND c.kind = 'image' AND e.clip_id IS NULL",
+            (model, clip_id),
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> Clip:

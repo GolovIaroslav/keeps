@@ -13,6 +13,27 @@ from keeps.store import Clip
 
 DEFAULT_THRESHOLD = 0.35
 DEFAULT_TOP_N = 20
+RRF_K = 60
+
+
+def reciprocal_rank_fusion(
+    score_sets: list[dict[int, float]], top_n: int = DEFAULT_TOP_N
+) -> dict[int, float]:
+    """Fuse independent embedding spaces by rank, never by raw cosine value.
+
+    Granite and SigLIP2 have different cosine distributions. RRF makes the
+    first result from either model equally strong and boosts clips found by
+    more than one model (for example an image matched by both OCR and vision).
+    Values are normalized so the first result from one model is 1.0 and stay
+    compatible with the existing semantic threshold.
+    """
+    fused: dict[int, float] = {}
+    for scores in score_sets:
+        ranked = sorted(scores, key=lambda clip_id: (-scores[clip_id], clip_id))[:top_n]
+        for rank, clip_id in enumerate(ranked, start=1):
+            fused[clip_id] = fused.get(clip_id, 0.0) + 1.0 / (RRF_K + rank)
+    scale = RRF_K + 1
+    return {clip_id: score * scale for clip_id, score in fused.items()}
 
 
 class SearchMode(Enum):
