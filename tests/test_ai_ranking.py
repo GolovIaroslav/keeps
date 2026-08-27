@@ -1,4 +1,4 @@
-from keeps.ai.ranking import SearchMode, blend
+from keeps.ai.ranking import SearchMode, blend, reciprocal_rank_fusion
 from keeps.store import Clip
 
 
@@ -80,12 +80,65 @@ def test_missing_clip_lookup_is_skipped_not_crashed():
 
 
 MODE_CYCLE_CASES = [
-    (SearchMode.BLENDED, SearchMode.KEYWORD),
-    (SearchMode.KEYWORD, SearchMode.SEMANTIC),
-    (SearchMode.SEMANTIC, SearchMode.BLENDED),
+    (SearchMode.KEYWORD, SearchMode.BLENDED),
+    (SearchMode.BLENDED, SearchMode.SEMANTIC),
+    (SearchMode.SEMANTIC, SearchMode.KEYWORD),
 ]
 
 
 def test_mode_next_cycles_in_fixed_order():
     for current, expected in MODE_CYCLE_CASES:
         assert current.next() == expected
+
+
+def test_rank_fusion_does_not_compare_raw_scores_from_different_models():
+    fused = reciprocal_rank_fusion(
+        [
+            {1: 0.91, 2: 0.80},
+            {3: 0.22, 4: 0.21},
+        ],
+        thresholds=[0.35, 0.20],
+    )
+
+    assert fused[1] == fused[3]
+    assert fused[2] == fused[4]
+
+
+def test_rank_fusion_boosts_an_image_found_by_visual_and_ocr_embeddings():
+    fused = reciprocal_rank_fusion(
+        [
+            {1: 0.9, 2: 0.8},
+            {3: 0.3, 2: 0.2},
+        ],
+        thresholds=[0.35, 0.15],
+    )
+
+    assert fused[2] > fused[1]
+    assert fused[2] > fused[3]
+
+
+def test_rank_fusion_rejects_best_available_scores_below_native_threshold():
+    assert reciprocal_rank_fusion(
+        [{1: -0.4, 2: -0.8}], thresholds=[0.35]
+    ) == {}
+
+
+def test_rank_fusion_does_not_truncate_before_later_content_filtering():
+    scores = {clip_id: 1.0 - clip_id / 1000 for clip_id in range(1, 26)}
+
+    fused = reciprocal_rank_fusion([scores], thresholds=[0.0])
+
+    assert 25 in fused
+
+
+def test_blend_applies_allowed_clip_set_before_top_n_cutoff():
+    # Simulates the popup Text filter: the first 20 semantic ids were images
+    # and therefore are absent from clips_by_id; text id 21 must still surface.
+    scores = {clip_id: 1.0 - clip_id / 1000 for clip_id in range(1, 22)}
+    clips_by_id = {21: _clip(21)}
+
+    result = blend(
+        [], scores, clips_by_id, mode=SearchMode.SEMANTIC, threshold=0.0, top_n=20
+    )
+
+    assert [clip.id for clip in result] == [21]

@@ -124,6 +124,31 @@ TEXT_EMBED = ModelSpec(
     ),
 )
 
+IMAGE_EMBED = ModelSpec(
+    name="image-embed-siglip2-base-int8",
+    label="Image embeddings (SigLIP 2 Base INT8, multilingual)",
+    files=(
+        ModelFile(
+            repo="onnx-community/siglip2-base-patch16-224-ONNX",
+            path_in_repo="onnx/text_model_int8.onnx",
+            sha256="3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400",
+            size_bytes=283_438_275,
+        ),
+        ModelFile(
+            repo="onnx-community/siglip2-base-patch16-224-ONNX",
+            path_in_repo="onnx/vision_model_int8.onnx",
+            sha256="0dd31785a2713f1113ef2272472165c69d580473dae38d7b47568ac587795e70",
+            size_bytes=94_553_333,
+        ),
+        ModelFile(
+            repo="onnx-community/siglip2-base-patch16-224-ONNX",
+            path_in_repo="tokenizer.json",
+            sha256="cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+            size_bytes=34_363_039,
+        ),
+    ),
+)
+
 OCR_DET = ModelSpec(
     name="ocr-det",
     label="OCR text detector (shared by all languages)",

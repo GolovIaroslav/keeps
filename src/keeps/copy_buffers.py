@@ -24,6 +24,8 @@ MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 class BufferCaptureWatcher(Protocol):
+    def mark_self_set(self) -> None: ...
+
     def capture_next_for_buffer(
         self, callback: Callable[[str, dict[str, bytes]], None]
     ) -> None: ...
@@ -123,6 +125,7 @@ class CopyBufferController(QObject):
             target, str(config.get(self._settings, "paste/app_shortcuts"))
         )
         self._operation = _Operation("paste", slot, snapshot, shortcut)
+        self._watcher.mark_self_set()
         QGuiApplication.clipboard().setMimeData(make_mime_data(buffer.mime_data))
         self._paste_delay.start(int(config.get(self._settings, "paste/delay_ms")))
         return True
@@ -208,10 +211,10 @@ class CopyBufferController(QObject):
         self._restore_snapshot(operation.snapshot)
         self._operation = None
 
-    @staticmethod
-    def _restore_snapshot(snapshot: dict[str, bytes], *, force: bool = False) -> None:
+    def _restore_snapshot(self, snapshot: dict[str, bytes], *, force: bool = False) -> None:
         clipboard = QGuiApplication.clipboard()
         if force or clipboard.ownsClipboard():
+            self._watcher.mark_self_set()
             clipboard.setMimeData(restore_mime_data(snapshot))
 
     def _status(self, message: str) -> None:

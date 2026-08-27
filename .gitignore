@@ -6,6 +6,7 @@ dist/
 build/
 AppDir/
 *.AppImage
+packaging/runtime-*
 .venv/
 .python-version
 

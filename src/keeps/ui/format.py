@@ -2,9 +2,42 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import datetime
 
 from keeps.store import normalize, normalize_with_mapping
+
+
+@dataclass(frozen=True)
+class TextStatistics:
+    """Fast, Unicode-aware text counts for the View dialog."""
+
+    words: int
+    characters: int
+    characters_without_whitespace: int
+    lines: int
+    paragraphs: int
+
+
+def text_statistics(text: str) -> TextStatistics:
+    """Return useful text counts without parsing or loading any language model."""
+    return TextStatistics(
+        words=len(re.findall(r"[^\W_]+", text, flags=re.UNICODE)),
+        characters=len(text),
+        characters_without_whitespace=sum(not character.isspace() for character in text),
+        lines=text.count("\n") + 1 if text else 0,
+        paragraphs=len([part for part in re.split(r"\n\s*\n", text.strip()) if part]),
+    )
+
+
+def format_byte_size(size: int) -> str:
+    """Compact binary size suitable for a metadata line."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
 
 
 def highlight_ranges(text: str, query: str) -> list[tuple[int, int]]:

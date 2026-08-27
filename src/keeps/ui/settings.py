@@ -70,7 +70,7 @@ HOTKEYS_HTML = """\
 <tr><td>typing text</td><td>filter the list live</td></tr>
 <tr><td>&uarr;/&darr;, PgUp/PgDn</td>
     <td>navigate (from the search field, arrows move the list)</td></tr>
-<tr><td>Ctrl+A</td><td>select all visible search results</td></tr>
+<tr><td>Ctrl+A</td><td>select search text, or all visible results from the list</td></tr>
 <tr><td>Enter / double-click</td>
     <td>paste the selected item; multiple items are joined as plain text</td></tr>
 <tr><td>Shift+Enter</td><td>paste as plain text (also used for multiple items)</td></tr>
@@ -368,6 +368,18 @@ class SettingsDialog(QDialog):
             lambda v: self._save("popup/keep_search_after_paste", v)
         )
         form.addRow(self.tr("Keep search after paste"), keep_search)
+
+        short_keywords = QCheckBox()
+        short_keywords.setChecked(
+            bool(config.get(self._settings, "popup/keyword_short_first"))
+        )
+        short_keywords.setToolTip(
+            self.tr("Prefer compact clips where the query makes up more of the text")
+        )
+        short_keywords.toggled.connect(
+            lambda v: self._save("popup/keyword_short_first", v)
+        )
+        form.addRow(self.tr("Short keyword matches first"), short_keywords)
 
         multi_separator = QLineEdit(
             multi_paste.separator_to_display(
@@ -794,12 +806,14 @@ class SettingsDialog(QDialog):
         ocr_box.toggled.connect(self._on_ocr_toggled)
         toggles.addRow(self.tr("OCR text from image clips"), ocr_box)
 
-        image_semantic_status = QLabel(
-            self.tr("Image semantic search — experimental, not implemented yet")
+        image_semantic_box = QCheckBox()
+        image_semantic_box.setChecked(
+            bool(config.get(self._settings, "ai/image_semantic_enabled"))
         )
-        image_semantic_status.setEnabled(False)
-        image_semantic_status.setWordWrap(True)
-        toggles.addRow(image_semantic_status)
+        image_semantic_box.toggled.connect(self._on_image_semantic_toggled)
+        toggles.addRow(
+            self.tr("Visual semantic search over image clips"), image_semantic_box
+        )
         layout.addLayout(toggles)
 
         timing = QFormLayout()
@@ -841,9 +855,16 @@ class SettingsDialog(QDialog):
                 )
             )
         layout.addWidget(self._build_ocr_languages_section())
-        layout.addWidget(
-            self._build_model_section(self.tr("Image-semantic search"), None, None, None, None)
-        )
+        if self._ai_runtime is not None:
+            layout.addWidget(
+                self._build_model_section(
+                    self.tr("Image-semantic search"),
+                    (models.IMAGE_EMBED,),
+                    self._ai_runtime.image_embed_status,
+                    self._ai_runtime.load_image_embedder,
+                    self._ai_runtime.unload_image_embedder,
+                )
+            )
 
         layout.addStretch(1)
         return widget
@@ -855,8 +876,15 @@ class SettingsDialog(QDialog):
 
     def _on_rag_toggled(self, checked: bool) -> None:
         self._save("ai/rag_text_enabled", checked)
-        if checked and self._ai_runtime is not None:
-            self._ai_runtime.run_text_embed_backlog_sweep()
+        if self._ai_runtime is None:
+            return
+        self._ai_runtime.semantic_capabilities_changed()
+
+    def _on_image_semantic_toggled(self, checked: bool) -> None:
+        self._save("ai/image_semantic_enabled", checked)
+        if self._ai_runtime is None:
+            return
+        self._ai_runtime.semantic_capabilities_changed()
 
     def _build_model_section(
         self,

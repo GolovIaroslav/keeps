@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from keeps.capture.base import extract_text_from_html
 from keeps.text_encoding import decode_unicode_escapes, normalize_plain_text
 
 if TYPE_CHECKING:
@@ -41,9 +42,10 @@ CREATE TABLE IF NOT EXISTS thumbs (
   png     BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embeddings (
-  clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+  clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
   model   TEXT NOT NULL,
-  vec     BLOB NOT NULL
+  vec     BLOB NOT NULL,
+  PRIMARY KEY (clip_id, model)
 );
 """
 
@@ -53,7 +55,7 @@ PREVIEW_MAX_CHARS = 300
 # EXISTS) always brings any DB -- brand new, or one that predates this
 # migration system entirely -- up to the v1 baseline; MIGRATIONS only needs
 # entries for v2 and beyond.
-LATEST_VERSION = 5
+LATEST_VERSION = 6
 
 
 def _migrate_v2_groups(conn: sqlite3.Connection) -> None:
@@ -101,11 +103,27 @@ def _migrate_v5_copy_buffers(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v6_multiple_embeddings(conn: sqlite3.Connection) -> None:
+    """Allow OCR/text and visual embeddings to coexist for an image clip."""
+    conn.execute(
+        "CREATE TABLE embeddings_v6 ("
+        "clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE, "
+        "model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (clip_id, model))"
+    )
+    conn.execute(
+        "INSERT INTO embeddings_v6 (clip_id, model, vec) "
+        "SELECT clip_id, model, vec FROM embeddings"
+    )
+    conn.execute("DROP TABLE embeddings")
+    conn.execute("ALTER TABLE embeddings_v6 RENAME TO embeddings")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v2_groups,
     3: _migrate_v3_alias,
     4: _migrate_v4_clip_hotkeys,
     5: _migrate_v5_copy_buffers,
+    6: _migrate_v6_multiple_embeddings,
 }
 
 BACKUP_KEEP = 3
@@ -190,12 +208,39 @@ def _canonical_bytes(kind: str, mime_data: dict[str, bytes]) -> bytes:
     if kind == "text":
         return mime_data["text/plain"]
     if kind == "image":
-        return mime_data["image/png"]
+        return _png_without_nonvisual_metadata(mime_data["image/png"])
     if kind == "files":
         return mime_data["text/uri-list"]
     if kind == "html":
         return mime_data.get("text/plain", mime_data.get("text/html", b""))
     raise ValueError(f"unknown kind: {kind}")
+
+
+def _png_without_nonvisual_metadata(data: bytes) -> bytes:
+    """Strip PNG text/timestamp chunks for image deduplication.
+
+    Screenshot tools can publish an identical image twice while changing only
+    textual metadata. Keep all colour and pixel-affecting chunks intact; an
+    invalid PNG deliberately falls back to its original bytes.
+    """
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        return data
+
+    result = bytearray(signature)
+    position = len(signature)
+    while position < len(data):
+        if position + 12 > len(data):
+            return data
+        length = struct.unpack(">I", data[position : position + 4])[0]
+        end = position + 12 + length
+        if end > len(data):
+            return data
+        chunk_type = data[position + 4 : position + 8]
+        if chunk_type not in {b"tEXt", b"zTXt", b"iTXt", b"tIME"}:
+            result.extend(data[position:end])
+        position = end
+    return bytes(result)
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:
@@ -211,7 +256,13 @@ def build_preview(kind: str, mime_data: dict[str, bytes]) -> str:
         text = normalize_plain_text(mime_data["text/plain"]).decode("utf-8")
         return text[:PREVIEW_MAX_CHARS]
     if kind == "html":
-        text = normalize_plain_text(mime_data.get("text/plain", b"")).decode("utf-8")
+        plain_bytes = mime_data.get("text/plain", b"")
+        if plain_bytes:
+            text = normalize_plain_text(plain_bytes).decode("utf-8")
+        elif "text/html" in mime_data:
+            text = extract_text_from_html(mime_data["text/html"])
+        else:
+            text = ""
         return text[:PREVIEW_MAX_CHARS]
     if kind == "image":
         dims = _png_dimensions(mime_data["image/png"])
@@ -232,6 +283,10 @@ class Store:
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # A clip capture is an independent transaction. In WAL mode NORMAL
+        # keeps commits fast while preserving database consistency; at most
+        # the most recent transactions can be lost on a sudden power failure.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
@@ -488,11 +543,14 @@ class Store:
 
         preview = build_preview(kind, mime_data)
         last_used_at = self._next_usage_timestamps(1)[0]
+        ocr_text = None if kind == "image" else row["ocr_text"]
         self._conn.execute(
-            "UPDATE clips SET preview = ?, hash = ?, last_used_at = ? WHERE id = ?",
-            (preview, new_hash, last_used_at, clip_id),
+            "UPDATE clips SET preview = ?, hash = ?, last_used_at = ?, ocr_text = ? "
+            "WHERE id = ?",
+            (preview, new_hash, last_used_at, ocr_text, clip_id),
         )
         self._conn.execute("DELETE FROM clip_data WHERE clip_id = ?", (clip_id,))
+        self._conn.execute("DELETE FROM embeddings WHERE clip_id = ?", (clip_id,))
         self._conn.executemany(
             "INSERT INTO clip_data (clip_id, mime, data) VALUES (?, ?, ?)",
             [(clip_id, mime, data) for mime, data in mime_data.items()],
@@ -500,9 +558,7 @@ class Store:
         if kind == "image":
             self._conn.execute("DELETE FROM thumbs WHERE clip_id = ?", (clip_id,))
         self._conn.commit()
-        self._search_index.upsert(
-            clip_id, kind, mime_data, row["ocr_text"], row["alias"]
-        )
+        self._search_index.upsert(clip_id, kind, mime_data, ocr_text, row["alias"])
         return clip_id
 
     def set_pinned(self, clip_id: int, pinned: bool) -> None:
@@ -539,6 +595,25 @@ class Store:
         ).fetchall()
         return [self._row_to_clip(row) for row in rows]
 
+    def clips_by_ids(self, clip_ids: list[int]) -> list[Clip]:
+        """Hydrate only requested clips, preserving first requested order."""
+        clip_ids = list(dict.fromkeys(clip_ids))
+        if not clip_ids:
+            return []
+        rows_by_id: dict[int, sqlite3.Row] = {}
+        for start in range(0, len(clip_ids), 900):
+            batch = clip_ids[start : start + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = self._conn.execute(
+                f"SELECT * FROM clips WHERE id IN ({placeholders})", batch
+            ).fetchall()
+            rows_by_id.update({row["id"]: row for row in rows})
+        return [
+            self._row_to_clip(rows_by_id[clip_id])
+            for clip_id in clip_ids
+            if clip_id in rows_by_id
+        ]
+
     def groups(self) -> list[Group]:
         rows = self._conn.execute(
             "SELECT id, name, sort_order FROM groups ORDER BY sort_order, id"
@@ -564,6 +639,21 @@ class Store:
                 clip.manual_order if clip.manual_order is not None else 0,
                 history_position[clip.id],
             ),
+        )
+
+    def count_in_scope(self, scope: str) -> int:
+        if scope == "history":
+            where, params = "1", ()
+        elif scope == "pinned":
+            where, params = "pinned = 1", ()
+        elif scope.startswith("group:"):
+            where, params = "group_id = ?", (int(scope.partition(":")[2]),)
+        else:
+            raise ValueError(f"unknown scope: {scope}")
+        return int(
+            self._conn.execute(
+                f"SELECT count(*) FROM clips WHERE {where}", params
+            ).fetchone()[0]
         )
 
     def create_group(self, name: str) -> int:
@@ -632,6 +722,13 @@ class Store:
             else row["data"]
             for row in rows
         }
+
+    def content_hash(self, clip_id: int) -> str | None:
+        """Return the current content hash, or None if the clip was deleted."""
+        row = self._conn.execute(
+            "SELECT hash FROM clips WHERE id = ?", (clip_id,)
+        ).fetchone()
+        return row["hash"] if row is not None else None
 
     @staticmethod
     def _validate_copy_buffer(slot: int, kind: str, mime_data: dict[str, bytes]) -> None:
@@ -760,13 +857,37 @@ class Store:
         return self.search_with_reasons(query)[0]
 
     def search_with_reasons(
-        self, query: str
+        self, query: str, *, prefer_short: bool = False
     ) -> tuple[list[Clip], dict[int, MatchReason]]:
         """Full-content, casefolded AND search plus exact/OCR match reasons."""
         if not query.strip():
             return self.all(), {}
         reasons = self._search_index.search(query)
-        return [clip for clip in self.all() if clip.id in reasons], reasons
+        if not reasons:
+            return [], reasons
+
+        # SQLite limits bound parameters (commonly to 999), so fetch matching
+        # rows in safe batches.  Hydrating the whole history here made an exact
+        # search unnecessarily slow once a user had thousands of clips.
+        rows: list[sqlite3.Row] = []
+        clip_ids = list(reasons)
+        for start in range(0, len(clip_ids), 900):
+            batch = clip_ids[start : start + 900]
+            placeholders = ", ".join("?" for _ in batch)
+            rows.extend(
+                self._conn.execute(
+                    f"SELECT * FROM clips WHERE id IN ({placeholders})", batch
+                ).fetchall()
+            )
+        rows.sort(key=lambda row: (row["last_used_at"], row["id"]), reverse=True)
+        if prefer_short:
+            rows.sort(
+                key=lambda row: self._search_index.keyword_rank(
+                    row["id"], query, reasons[row["id"]]
+                ),
+                reverse=True,
+            )
+        return [self._row_to_clip(row) for row in rows], reasons
 
     def search_snippet(
         self, clip_id: int, query: str, reason: MatchReason
@@ -781,10 +902,39 @@ class Store:
     def set_embedding(self, clip_id: int, model: str, vec: bytes) -> None:
         self._conn.execute(
             "INSERT INTO embeddings (clip_id, model, vec) VALUES (?, ?, ?) "
-            "ON CONFLICT(clip_id) DO UPDATE SET model = excluded.model, vec = excluded.vec",
+            "ON CONFLICT(clip_id, model) DO UPDATE SET vec = excluded.vec",
             (clip_id, model, vec),
         )
         self._conn.commit()
+
+    def clip_needs_embedding(self, clip_id: int, model: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.id = ? AND (c.kind IN ('text', 'html') OR "
+            "(c.kind = 'image' AND trim(coalesce(c.ocr_text, '')) != '')) "
+            "AND e.clip_id IS NULL",
+            (model, clip_id),
+        ).fetchone()
+        return row is not None
+
+    def embedding_text(self, clip_id: int) -> str | None:
+        row = self._conn.execute(
+            "SELECT kind, ocr_text FROM clips WHERE id = ?", (clip_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        if row["kind"] == "image":
+            return row["ocr_text"]
+        data = self.get_data(clip_id).get("text/plain")
+        return data.decode("utf-8", errors="replace") if data is not None else None
+
+    def clip_needs_ocr(self, clip_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips WHERE id = ? AND kind = 'image' AND ocr_text IS NULL",
+            (clip_id,),
+        ).fetchone()
+        return row is not None
 
     def get_all_embeddings(self, model: str) -> list[tuple[int, bytes]]:
         rows = self._conn.execute(
@@ -810,14 +960,34 @@ class Store:
         return [row["id"] for row in rows]
 
     def clips_missing_embedding(self, model: str) -> list[int]:
-        """Text/html clip ids with no `model` embedding yet -- text-RAG backlog sweep."""
+        """Text/html or OCR-image ids missing the requested embedding."""
         rows = self._conn.execute(
             "SELECT c.id FROM clips c "
             "LEFT JOIN embeddings e ON e.clip_id = c.id AND e.model = ? "
-            "WHERE c.kind IN ('text', 'html') AND e.clip_id IS NULL",
+            "WHERE (c.kind IN ('text', 'html') OR "
+            "(c.kind = 'image' AND trim(coalesce(c.ocr_text, '')) != '')) "
+            "AND e.clip_id IS NULL",
             (model,),
         ).fetchall()
         return [row["id"] for row in rows]
+
+    def clips_missing_image_embedding(self, model: str) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT c.id FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.kind = 'image' AND e.clip_id IS NULL ORDER BY c.id",
+            (model,),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def clip_needs_image_embedding(self, clip_id: int, model: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM clips c LEFT JOIN embeddings e "
+            "ON e.clip_id = c.id AND e.model = ? "
+            "WHERE c.id = ? AND c.kind = 'image' AND e.clip_id IS NULL",
+            (model, clip_id),
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> Clip:

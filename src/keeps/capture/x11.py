@@ -57,12 +57,14 @@ class X11Watcher(QObject):
     def cancel_buffer_capture(self) -> None:
         self._buffer_capture = None
 
+    def mark_self_set(self) -> None:
+        """Ignore the next programmatic clipboard write made by Keeps."""
+        self.guard.mark_self_set()
+
     def _on_changed(self) -> None:
-        # Our own clipboard write (popup paste/copy) also fires dataChanged;
-        # the clip is already in the store, nothing to capture. (No deadlock
-        # risk here, unlike Wayland -- QClipboard reads in-process -- just a
-        # pointless re-capture of our own data.)
-        if self._clipboard.ownsClipboard():
+        # Popup/copy-buffer writes mark this one event. A manual Ctrl+C in a
+        # Keeps dialog is also owned by this process, but must be captured.
+        if self.guard.consume_skip():
             return
         self._mime_data = self._clipboard.mimeData()
         available = self._available_types()
@@ -113,7 +115,17 @@ class X11Watcher(QObject):
 
     def _read_mime(self, mime: str) -> bytes:
         if mime == MIME_PLAIN:
+            # This canonical fallback is synthesized from QMimeData.hasText(),
+            # so Qt has already decoded the platform selection for us.
             return self._mime_data.text().encode("utf-8")
+        if mime in ("UTF8_STRING", "TEXT", "STRING") or mime.lower().startswith(
+            "text/plain"
+        ):
+            # Preserve the bytes of explicitly advertised text formats. The
+            # capture layer can then honor a declared charset instead of
+            # decoding through Qt and accidentally applying that charset a
+            # second time to already-UTF-8 data.
+            return bytes(self._mime_data.data(mime))
         if mime == MIME_HTML:
             return self._mime_data.html().encode("utf-8")
         if mime == MIME_URI_LIST:

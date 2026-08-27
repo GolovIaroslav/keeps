@@ -48,6 +48,25 @@ def test_popup_does_not_treat_the_first_stroke_of_a_chord_as_a_shortcut():
     assert not PopupWindow._matches_keybinding(popup, event, "delete")
 
 
+def test_ctrl_a_in_search_field_selects_search_text_not_clip_rows():
+    search_edit = object()
+    popup = SimpleNamespace(
+        search_edit=search_edit,
+        list_view=object(),
+        tabs=object(),
+        _mode_combo=object(),
+        _handle_wheel=lambda _event: False,
+        _handle_key=lambda _event: True,
+    )
+    event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_A,
+        Qt.KeyboardModifier.ControlModifier,
+    )
+
+    assert PopupWindow.eventFilter(popup, search_edit, event) is False
+
+
 def test_default_aliases_are_reserved_from_local_clip_hotkeys():
     popup = SimpleNamespace(
         _keybinding_text=lambda action: DEFAULT_POPUP_KEYBINDINGS[action]

@@ -1,6 +1,6 @@
 import pytest
 
-from keeps.ui.format import highlight_ranges, relative_time
+from keeps.ui.format import format_byte_size, highlight_ranges, relative_time, text_statistics
 
 NOW = 1_000_000_000_000  # arbitrary fixed "now" in unix ms
 
@@ -38,3 +38,26 @@ def test_relative_time_far_past_is_a_date():
 )
 def test_highlight_ranges(text, query, expected):
     assert highlight_ranges(text, query) == expected
+
+
+def test_text_statistics_counts_unicode_words_and_visible_structure():
+    stats = text_statistics("Привет, world!\n\nЕщё строка.")
+
+    assert stats.words == 4
+    assert stats.characters == 27
+    assert stats.characters_without_whitespace == 23
+    assert stats.lines == 3
+    assert stats.paragraphs == 2
+
+
+def test_text_statistics_treats_empty_text_as_no_lines_or_paragraphs():
+    assert text_statistics("").lines == 0
+    assert text_statistics("").paragraphs == 0
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [(0, "0 B"), (999, "999 B"), (1024, "1.0 KiB"), (2 * 1024 * 1024, "2.0 MiB")],
+)
+def test_format_byte_size(size, expected):
+    assert format_byte_size(size) == expected

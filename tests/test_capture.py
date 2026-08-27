@@ -15,6 +15,10 @@ from keeps.store import Store
 
 DETECT_CASES = [
     ({MIME_PLAIN}, "text"),
+    ({"text/plain;charset=utf-8"}, "text"),
+    ({"UTF8_STRING"}, "text"),
+    ({"COMPOUND_TEXT"}, "text"),
+    ({"text/plain;charset=utf-8", "STRING"}, "text"),
     ({MIME_PLAIN, MIME_HTML}, "html"),
     ({MIME_URI_LIST, MIME_PLAIN}, "files"),
     ({MIME_IMAGE}, "image"),
@@ -273,3 +277,94 @@ def test_bundle_roundtrips_into_store(tmp_path, available, mime_bytes, expected_
         assert store.get_data(clip_id) == mime_data
     finally:
         store.close()
+
+
+def test_build_bundle_prefers_utf8_plain_mime():
+    reads = []
+    payloads = {
+        "text/plain;charset=utf-8": "Princípy informačných systémov".encode(),
+        "text/plain": b"Princ?py informa?n?ch syst?mov",
+    }
+
+    def reader(mime: str) -> bytes:
+        reads.append(mime)
+        return payloads[mime]
+
+    result = build_bundle({"text/plain;charset=utf-8", "text/plain"}, reader)
+    assert result is not None
+    kind, bundle = result
+    assert kind == "text"
+    assert reads == ["text/plain;charset=utf-8"]
+    assert bundle == {MIME_PLAIN: "Princípy informačných systémov".encode()}
+
+
+def test_plain_text_prefers_qt_canonical_text_over_compound_text():
+    reads = []
+
+    result = build_bundle(
+        {MIME_PLAIN, "COMPOUND_TEXT"},
+        lambda mime: reads.append(mime) or b"canonical text",
+    )
+
+    assert result == ("text", {MIME_PLAIN: b"canonical text"})
+    assert reads == [MIME_PLAIN]
+
+
+def test_build_bundle_honors_declared_plain_text_charset():
+    mime = "text/plain;charset=windows-1252"
+    text = "Price £12.50 — “quoted”"
+
+    result = build_bundle({MIME_PLAIN, mime}, lambda _mime: text.encode("cp1252"))
+
+    assert result == ("text", {MIME_PLAIN: text.encode()})
+
+
+def test_x11_reader_preserves_bytes_for_explicit_text_charset():
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import QByteArray, QMimeData
+
+    from keeps.capture.x11 import X11Watcher
+
+    mime = "text/plain;charset=windows-1252"
+    text = "Price £12.50 — “quoted”"
+    mime_data = QMimeData()
+    mime_data.setData(mime, QByteArray(text.encode("cp1252")))
+    mime_data.setText(text)
+    watcher = SimpleNamespace(_mime_data=mime_data)
+
+    assert X11Watcher._read_mime(watcher, mime) == text.encode("cp1252")
+    assert X11Watcher._read_mime(watcher, MIME_PLAIN) == text.encode()
+
+
+def test_build_bundle_html_only_extracts_plain_text_fallback():
+    html = b"<h1>Anal\xc3\xbdza a zlo\xc5\xbeitos\xc5\xa5 algoritmov</h1><p>Popis kurzu</p>"
+    result = build_bundle({MIME_HTML}, lambda _mime: html)
+    assert result is not None
+    kind, bundle = result
+    assert kind == "html"
+    assert bundle[MIME_HTML] == html
+    assert bundle[MIME_PLAIN] == "Analýza a zložitosť algoritmov\nPopis kurzu".encode()
+
+
+def test_build_bundle_html_fallback_ignores_meta_and_nested_head_content():
+    html = (
+        b"<html><head><meta charset='utf-8'><script>hidden()</script>"
+        b"<title>Hidden title</title></head><body><p>Visible body</p></body></html>"
+    )
+
+    result = build_bundle({MIME_HTML}, lambda _mime: html)
+
+    assert result is not None
+    kind, bundle = result
+    assert kind == "html"
+    assert bundle[MIME_PLAIN] == b"Visible body"
+
+
+def test_build_bundle_html_fallback_decodes_numeric_character_references():
+    html = b"<p>Po&#269;&#237;ta&#269;</p>"
+
+    result = build_bundle({MIME_HTML}, lambda _mime: html)
+
+    assert result is not None
+    assert result[1][MIME_PLAIN] == "Počítač".encode()

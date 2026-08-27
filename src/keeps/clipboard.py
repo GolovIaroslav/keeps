@@ -20,6 +20,9 @@ def make_mime_data(mime_data: dict[str, bytes], *, plain_only: bool = False) -> 
     png = mime_data.get("image/png")
     if png is not None:
         result.setImageData(QImage.fromData(png, "PNG"))
+        # Some Wayland consumers request the concrete PNG offer and do not
+        # understand Qt's private application/x-qt-image representation.
+        result.setData("image/png", png)
     uri_list = mime_data.get("text/uri-list")
     if uri_list is not None:
         result.setUrls([QUrl(line) for line in uri_list.decode("utf-8").splitlines() if line])

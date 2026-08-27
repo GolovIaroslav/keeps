@@ -19,6 +19,7 @@ requiring another live smoke test.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
@@ -26,6 +27,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication, QSettings
 
 from keeps.ai import models
+from keeps.ai.ranking import SearchMode
 from keeps.ai.runtime import AiRuntime, available_ocr_language_codes
 from keeps.store import Store
 
@@ -81,6 +83,99 @@ class FakeOcrEngine:
         self.is_loaded = False
 
 
+class FakeImageEmbedder(FakeEmbedder):
+    def encode_text(self, text: str) -> np.ndarray:
+        return self.encode(text)
+
+    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+        self.calls.append("<image>")
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+
+class BlockingEmbedder(FakeEmbedder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def encode(self, text: str) -> np.ndarray:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().encode(text)
+
+
+class BlockingOcrEngine(FakeOcrEngine):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def extract_text(self, png_bytes: bytes) -> str:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().extract_text(png_bytes)
+
+
+class BlockingImageEmbedder(FakeImageEmbedder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().encode_image(image_bytes)
+
+
+class BlockingQueryImageEmbedder(FakeImageEmbedder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def encode_text(self, text: str) -> np.ndarray:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().encode_text(text)
+
+
+class FailingImageEmbedder(FakeImageEmbedder):
+    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+        self.calls.append("<image-failed>")
+        raise ValueError("invalid image payload")
+
+
+class FailingTextEmbedder(FakeEmbedder):
+    def encode(self, text: str) -> np.ndarray:
+        self.calls.append(text)
+        raise ValueError("text model failure")
+
+
+class FailingOcrEngine(FakeOcrEngine):
+    def extract_text(self, png_bytes: bytes) -> str:
+        self.calls += 1
+        raise ValueError("ocr model failure")
+
+
+class FailingQueryImageEmbedder(FakeImageEmbedder):
+    def encode_text(self, text: str) -> np.ndarray:
+        raise ValueError("visual query model failure")
+
+
+class ContentAwareBlockingOcrEngine(FakeOcrEngine):
+    def __init__(self) -> None:
+        super().__init__("")
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def extract_text(self, png_bytes: bytes) -> str:
+        self.started.set()
+        self.release.wait(timeout=5)
+        self.calls += 1
+        return "new pixels" if png_bytes == PNG_1X1_RED else "old pixels"
+
+
 @pytest.fixture(scope="module")
 def qapp():
     return QCoreApplication.instance() or QCoreApplication([])
@@ -115,9 +210,18 @@ def _settle(qapp, seconds: float = 0.1) -> None:
         time.sleep(0.01)
 
 
-def _make_runtime(store, settings, *, rag_text=False, ocr=False, ocr_timing="delayed"):
+def _make_runtime(
+    store,
+    settings,
+    *,
+    rag_text=False,
+    ocr=False,
+    image_semantic=False,
+    ocr_timing="delayed",
+):
     settings.setValue("ai/rag_text_enabled", rag_text)
     settings.setValue("ai/ocr_enabled", ocr)
+    settings.setValue("ai/image_semantic_enabled", image_semantic)
     settings.setValue("ai/ocr_timing", ocr_timing)
     return AiRuntime(store, settings)
 
@@ -128,6 +232,12 @@ def test_background_ai_pool_is_bounded_for_model_memory(qapp, store, settings):
     assert runtime.ai_task_max_threads == 1
 
 
+def test_keyword_search_is_the_default_mode(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+
+    assert runtime.search_mode == SearchMode.KEYWORD
+
+
 # -- text/html capture -> embedding (independent of OCR) ---------------------
 
 
@@ -135,6 +245,7 @@ def test_text_clip_gets_embedded_when_rag_enabled(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True)
     fake = FakeEmbedder()
     runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("text", {"text/plain": b"hello world"})
     runtime.on_clip_captured(clip_id, "text")
@@ -142,6 +253,22 @@ def test_text_clip_gets_embedded_when_rag_enabled(qapp, store, settings):
     assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
     assert dict(store.get_all_embeddings(models.TEXT_EMBED.name)).keys() == {clip_id}
     assert fake.calls == ["hello world"]
+
+
+def test_duplicate_text_capture_does_not_repeat_completed_embedding(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    fake = FakeEmbedder()
+    runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.BLENDED)
+
+    clip_id = store.add("text", {"text/plain": b"same text"})
+    runtime.on_clip_captured(clip_id, "text")
+    assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
+
+    runtime.on_clip_captured(clip_id, "text")
+    _settle(qapp)
+
+    assert fake.calls == ["same text"]
 
 
 def test_text_clip_not_embedded_when_rag_disabled(qapp, store, settings):
@@ -184,6 +311,70 @@ def test_image_clip_ocr_immediate_sets_ocr_text(qapp, store, settings):
     assert clip.ocr_text == "Привет мир"
 
 
+def test_image_clip_gets_visual_embedding_when_semantic_mode_is_active(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    runtime._image_embedder = FakeImageEmbedder()
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+
+    assert _pump_until(
+        qapp, lambda: bool(store.get_all_embeddings(models.IMAGE_EMBED.name))
+    )
+    assert store.get_all_embeddings(models.IMAGE_EMBED.name)[0][0] == clip_id
+
+
+def test_query_fuses_text_and_visual_spaces_without_comparing_cosines(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    text_embedder = FakeEmbedder()
+    image_embedder = FakeImageEmbedder()
+    runtime._text_embedder = text_embedder
+    runtime._image_embedder = image_embedder
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+
+    text_id = store.add("text", {"text/plain": b"document"})
+    image_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_embedding(
+        text_id,
+        models.TEXT_EMBED.name,
+        text_embedder.encode("horse").astype("float32").tobytes(),
+    )
+    store.set_embedding(
+        image_id,
+        models.IMAGE_EMBED.name,
+        image_embedder.encode_text("horse").astype("float32").tobytes(),
+    )
+    completed = []
+
+    runtime.encode_query_async("horse", lambda query, scores: completed.append(scores))
+
+    assert _pump_until(qapp, lambda: bool(completed))
+    assert completed == [{text_id: 1.0, image_id: 1.0}]
+
+
+def test_duplicate_image_capture_does_not_repeat_completed_ocr(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    fake_ocr = FakeOcrEngine("recognized once")
+    runtime._ocr_engine = fake_ocr
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+
+    # Spectacle can publish the same screenshot again after Keeps has already
+    # indexed it. Store.add() returns the existing clip id in that case.
+    runtime.on_clip_captured(clip_id, "image")
+    _settle(qapp)
+
+    assert fake_ocr.calls == 1
+
+
 def test_image_clip_ignored_when_ocr_disabled(qapp, store, settings):
     runtime = _make_runtime(store, settings, ocr=False)
     fake_ocr = FakeOcrEngine()
@@ -216,9 +407,8 @@ def test_delayed_ocr_restarts_timer_and_batches_pending_ids(qapp, store, setting
     assert {c.id for c in store.all() if c.ocr_text} == {clip_1, clip_2}
 
 
-# -- OCR + RAG together: OCR'd text is embedded too, independent of the
-# (unimplemented) image_semantic_enabled toggle -- confirmed as intentional
-# behavior by the user 2026-07-11, see PLAN.md §9. ---------------------------
+# -- OCR + RAG together: OCR'd text is embedded independently of visual
+# image-semantic indexing, so an image may retain both model vectors. -------
 
 
 def test_ocr_text_gets_embedded_when_rag_and_ocr_both_enabled(qapp, store, settings):
@@ -226,6 +416,7 @@ def test_ocr_text_gets_embedded_when_rag_and_ocr_both_enabled(qapp, store, setti
     runtime._ocr_engine = FakeOcrEngine("screenshot text")
     fake_embedder = FakeEmbedder()
     runtime._text_embedder = fake_embedder
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("image", {"image/png": PNG_1X1})
     runtime.on_clip_captured(clip_id, "image")
@@ -253,6 +444,7 @@ def test_ocr_skips_embedding_for_blank_recognized_text(qapp, store, settings):
     runtime._ocr_engine = FakeOcrEngine("   ")
     fake_embedder = FakeEmbedder()
     runtime._text_embedder = fake_embedder
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     clip_id = store.add("image", {"image/png": PNG_1X1})
     runtime.on_clip_captured(clip_id, "image")
@@ -266,16 +458,309 @@ def test_ocr_skips_embedding_for_blank_recognized_text(qapp, store, settings):
 # -- backlog sweeps (one-time pass when a toggle is first enabled) ----------
 
 
-def test_text_embed_backlog_sweep_embeds_all_missing_clips(qapp, store, settings):
+def test_selecting_semantic_mode_embeds_backlog_but_keyword_mode_does_not(
+    qapp, store, settings
+):
     runtime = _make_runtime(store, settings, rag_text=True)
     runtime._text_embedder = FakeEmbedder()
     ids = [store.add("text", {"text/plain": f"clip {i}".encode()}) for i in range(3)]
 
+    for clip_id in ids:
+        runtime.on_clip_captured(clip_id, "text")
     runtime.run_text_embed_backlog_sweep()
+    _settle(qapp)
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+    runtime.set_search_mode(SearchMode.BLENDED)
 
     assert _pump_until(
         qapp, lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == len(ids)
     )
+
+
+def test_ocr_created_in_keyword_mode_is_embedded_after_semantic_activation(
+    qapp, store, settings
+):
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
+    )
+    runtime._ocr_engine = FakeOcrEngine("searchable screenshot")
+    fake_embedder = FakeEmbedder()
+    runtime._text_embedder = fake_embedder
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
+    assert fake_embedder.calls == ["searchable screenshot"]
+
+
+def test_returning_to_keyword_cancels_queued_semantic_backlog(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    for index in range(4):
+        store.add("text", {"text/plain": f"clip {index}".encode()})
+
+    runtime.set_search_mode(SearchMode.BLENDED)
+    assert blocker.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.KEYWORD)
+    blocker.release.set()
+
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+    assert blocker.calls == ["clip 0"]
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+
+def test_returning_to_keyword_cancels_inflight_semantic_query(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    callbacks = []
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    runtime.encode_query_async("needle", lambda *result: callbacks.append(result))
+    assert blocker.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.KEYWORD)
+    blocker.release.set()
+    _settle(qapp)
+
+    assert blocker.calls == ["needle"]
+    assert callbacks == []
+
+
+def test_completed_backlog_emits_one_semantic_index_change(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    runtime._text_embedder = FakeEmbedder()
+    for index in range(3):
+        store.add("text", {"text/plain": f"clip {index}".encode()})
+    changes = []
+    runtime.semantic_index_changed.connect(lambda: changes.append(True))
+
+    runtime.set_search_mode(SearchMode.BLENDED)
+
+    assert _pump_until(qapp, lambda: len(changes) == 1)
+    assert len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 3
+
+
+def test_image_backlog_refreshes_semantic_results_progressively(qapp, store, settings):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    runtime._image_embedder = FakeImageEmbedder()
+    for index in range(17):
+        # Different bytes avoid Store's content-hash dedup while the fake
+        # embedder deliberately ignores image validity.
+        store.add("image", {"image/png": PNG_1X1 + bytes([index])})
+    changes = []
+    runtime.semantic_index_changed.connect(lambda: changes.append(True))
+
+    runtime.set_search_mode(SearchMode.BLENDED)
+
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks, timeout=3)
+    assert len(store.get_all_embeddings(models.IMAGE_EMBED.name)) == 17
+    assert len(changes) >= 2
+
+
+def test_failed_visual_embedding_does_not_wedge_backlog(qapp, store, settings):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    runtime._image_embedder = FailingImageEmbedder()
+    first = store.add("image", {"image/png": PNG_1X1})
+    second = store.add("image", {"image/png": PNG_1X1_RED})
+
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks and not runtime._image_embed_backlog,
+    )
+    assert store.get_all_embeddings(models.IMAGE_EMBED.name) == []
+    assert set(store.clips_missing_image_embedding(models.IMAGE_EMBED.name)) == {
+        first,
+        second,
+    }
+
+
+def test_failed_text_embedding_does_not_wedge_backlog(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    runtime._text_embedder = FailingTextEmbedder()
+    first = store.add("text", {"text/plain": b"first"})
+    second = store.add("text", {"text/plain": b"second"})
+
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks and not runtime._text_embed_backlog,
+    )
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+    assert set(store.clips_missing_embedding(models.TEXT_EMBED.name)) == {first, second}
+
+
+def test_failed_ocr_does_not_wedge_backlog(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True)
+    runtime._ocr_engine = FailingOcrEngine()
+    first = store.add("image", {"image/png": PNG_1X1})
+    second = store.add("image", {"image/png": PNG_1X1_RED})
+
+    runtime.run_ocr_backlog_sweep()
+
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks and not runtime._ocr_backlog,
+    )
+    assert set(store.clips_missing_ocr()) == {first, second}
+
+
+def test_large_backlogs_keep_only_one_payload_per_ai_kind_in_qt_pool(
+    qapp, store, settings
+):
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, image_semantic=True
+    )
+    text = BlockingEmbedder()
+    image = BlockingImageEmbedder()
+    ocr = BlockingOcrEngine("ocr")
+    runtime._text_embedder = text
+    runtime._image_embedder = image
+    runtime._ocr_engine = ocr
+    for index in range(12):
+        store.add("text", {"text/plain": f"large text {index}".encode()})
+        store.add("image", {"image/png": PNG_1X1 + bytes([index])})
+
+    runtime.set_search_mode(SearchMode.BLENDED)
+    runtime.run_ocr_backlog_sweep()
+    assert text.started.wait(timeout=2)
+
+    assert sum(kind == "text" for kind, _ in runtime._pending_ai_tasks) <= 1
+    assert sum(kind == "image" for kind, _ in runtime._pending_ai_tasks) <= 1
+    assert sum(kind == "ocr" for kind, _ in runtime._pending_ai_tasks) <= 1
+    assert len(runtime._text_embed_backlog) >= 10
+    assert len(runtime._image_embed_backlog) >= 10
+    assert len(runtime._ocr_backlog) >= 10
+
+    text.release.set()
+    image.release.set()
+    ocr.release.set()
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks
+        and not runtime._text_embed_backlog
+        and not runtime._image_embed_backlog
+        and not runtime._ocr_backlog,
+        timeout=5,
+    )
+
+
+def test_text_edit_during_inflight_embedding_cannot_store_stale_vector(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    clip_id = store.add("text", {"text/plain": b"old content"})
+    runtime.on_clip_captured(clip_id, "text")
+    assert blocker.started.wait(timeout=2)
+
+    store.update_content(clip_id, {"text/plain": b"new content"})
+    runtime.on_clip_captured(clip_id, "text")
+    blocker.release.set()
+
+    assert _pump_until(
+        qapp,
+        lambda: bool(store.get_all_embeddings(models.TEXT_EMBED.name))
+        and not runtime._pending_ai_tasks,
+    )
+    expected = FakeEmbedder().encode("new content").astype("float32").tobytes()
+    assert dict(store.get_all_embeddings(models.TEXT_EMBED.name))[clip_id] == expected
+    assert blocker.calls == ["old content", "new content"]
+
+
+def test_image_edit_during_inflight_visual_embedding_cannot_store_stale_vector(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    blocker = BlockingImageEmbedder()
+    runtime._image_embedder = blocker
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert blocker.started.wait(timeout=2)
+
+    store.update_content(clip_id, {"image/png": PNG_1X1_RED})
+    runtime.on_clip_captured(clip_id, "image")
+    blocker.release.set()
+
+    assert _pump_until(
+        qapp,
+        lambda: bool(store.get_all_embeddings(models.IMAGE_EMBED.name))
+        and not runtime._pending_ai_tasks,
+    )
+    assert blocker.calls == ["<image>", "<image>"]
+
+
+def test_image_edit_during_inflight_ocr_cannot_restore_old_ocr_text(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    blocker = ContentAwareBlockingOcrEngine()
+    runtime._ocr_engine = blocker
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert blocker.started.wait(timeout=2)
+
+    store.update_content(clip_id, {"image/png": PNG_1X1_RED})
+    runtime.on_clip_captured(clip_id, "image")
+    blocker.release.set()
+
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+    clip = next(c for c in store.all() if c.id == clip_id)
+    assert clip.ocr_text == "new pixels"
+    assert blocker.calls == 2
+
+
+def test_ocr_finishing_after_semantic_activation_gets_embedded(qapp, store, settings):
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
+    )
+    ocr = BlockingOcrEngine("late OCR text")
+    runtime._ocr_engine = ocr
+    embedder = FakeEmbedder()
+    runtime._text_embedder = embedder
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert ocr.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    ocr.release.set()
+
+    assert _pump_until(qapp, lambda: store.get_all_embeddings(models.TEXT_EMBED.name))
+    assert embedder.calls == ["late OCR text"]
+
+
+def test_ocr_finishing_after_return_to_keyword_is_not_embedded(qapp, store, settings):
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
+    )
+    ocr = BlockingOcrEngine("late OCR text")
+    runtime._ocr_engine = ocr
+    embedder = FakeEmbedder()
+    runtime._text_embedder = embedder
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert ocr.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.KEYWORD)
+    ocr.release.set()
+
+    assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
+    _settle(qapp)
+    assert embedder.calls == []
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
 
 
 def test_text_embed_backlog_sweep_noop_when_rag_disabled(qapp, store, settings):
@@ -306,6 +791,7 @@ def test_encode_query_async_delivers_nonempty_scores_across_thread_boundary(qapp
     runtime = _make_runtime(store, settings, rag_text=True)
     fake = FakeEmbedder()
     runtime._text_embedder = fake
+    runtime.set_search_mode(SearchMode.SEMANTIC)
 
     clip_id = store.add("text", {"text/plain": b"hello world"})
     vec_bytes = fake.encode("hello world").astype("float32").tobytes()
@@ -323,6 +809,40 @@ def test_encode_query_async_delivers_nonempty_scores_across_thread_boundary(qapp
     assert isinstance(received["scores"][clip_id], float)
 
 
+def test_failed_visual_query_encoder_keeps_text_results_and_delivers_callback(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    text = FakeEmbedder()
+    runtime._text_embedder = text
+    runtime._image_embedder = FailingQueryImageEmbedder()
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    clip_id = store.add("text", {"text/plain": b"hello"})
+    store.set_embedding(
+        clip_id,
+        models.TEXT_EMBED.name,
+        text.encode("hello").astype("float32").tobytes(),
+    )
+    received = []
+
+    runtime.encode_query_async("hello", lambda query, scores: received.append(scores))
+
+    assert _pump_until(qapp, lambda: bool(received))
+    assert clip_id in received[0]
+
+
+def test_failed_only_query_encoder_still_delivers_empty_callback(qapp, store, settings):
+    runtime = _make_runtime(store, settings, image_semantic=True)
+    runtime._image_embedder = FailingQueryImageEmbedder()
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    received = []
+
+    runtime.encode_query_async("hello", lambda query, scores: received.append(scores))
+
+    assert _pump_until(qapp, lambda: bool(received))
+    assert received == [{}]
+
+
 def test_encode_query_async_empty_query_short_circuits(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True)
     received: dict = {}
@@ -332,6 +852,104 @@ def test_encode_query_async_empty_query_short_circuits(qapp, store, settings):
     )
 
     assert received == {"query": "   ", "scores": {}}
+
+
+def test_new_query_cancels_stale_inflight_semantic_result(qapp, store, settings):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    clip_id = store.add("text", {"text/plain": b"document"})
+    vector = FakeEmbedder().encode("new").astype("float32").tobytes()
+    store.set_embedding(clip_id, models.TEXT_EMBED.name, vector)
+    completed = []
+
+    runtime.encode_query_async("old", lambda query, scores: completed.append(query))
+    assert blocker.started.wait(timeout=2)
+    runtime.encode_query_async("new", lambda query, scores: completed.append(query))
+    blocker.release.set()
+
+    assert _pump_until(qapp, lambda: completed == ["new"])
+
+
+def test_rapid_queries_coalesce_embedding_snapshots(
+    qapp, store, settings, monkeypatch
+):
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    clip_id = store.add("text", {"text/plain": b"document"})
+    vector = FakeEmbedder().encode("latest").astype("float32").tobytes()
+    store.set_embedding(clip_id, models.TEXT_EMBED.name, vector)
+
+    original_get_all = store.get_all_embeddings
+    snapshot_calls = []
+
+    def counted_get_all(model_name):
+        snapshot_calls.append(model_name)
+        return original_get_all(model_name)
+
+    monkeypatch.setattr(store, "get_all_embeddings", counted_get_all)
+    completed = []
+
+    runtime.encode_query_async("old", lambda query, scores: completed.append(query))
+    assert blocker.started.wait(timeout=2)
+    for index in range(10):
+        query = "latest" if index == 9 else f"stale-{index}"
+        runtime.encode_query_async(query, lambda query, scores: completed.append(query))
+
+    # Only the running query owns a materialized embedding snapshot. The ten
+    # newer requests are represented by one replaceable lightweight request.
+    assert snapshot_calls == [models.TEXT_EMBED.name]
+
+    blocker.release.set()
+
+    assert _pump_until(qapp, lambda: completed == ["latest"])
+    assert snapshot_calls == [models.TEXT_EMBED.name, models.TEXT_EMBED.name]
+
+
+def test_disabling_visual_semantics_cancels_inflight_mixed_query(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    text = FakeEmbedder()
+    visual = BlockingQueryImageEmbedder()
+    runtime._text_embedder = text
+    runtime._image_embedder = visual
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+
+    text_id = store.add("text", {"text/plain": b"document"})
+    image_id = store.add("image", {"image/png": PNG_1X1})
+    store.set_embedding(
+        text_id,
+        models.TEXT_EMBED.name,
+        text.encode("needle").astype("float32").tobytes(),
+    )
+    store.set_embedding(
+        image_id,
+        models.IMAGE_EMBED.name,
+        FakeImageEmbedder().encode_text("needle").astype("float32").tobytes(),
+    )
+    completed = []
+
+    runtime.encode_query_async(
+        "old mixed query", lambda query, scores: completed.append((query, scores))
+    )
+    assert visual.started.wait(timeout=2)
+
+    settings.setValue("ai/image_semantic_enabled", False)
+    runtime.semantic_capabilities_changed()
+    runtime.encode_query_async(
+        "needle", lambda query, scores: completed.append((query, scores))
+    )
+    visual.release.set()
+
+    assert _pump_until(qapp, lambda: len(completed) == 1)
+    query, scores = completed[0]
+    assert query == "needle"
+    assert text_id in scores
+    assert image_id not in scores
 
 
 # -- OCR language selection (Ф9.6 PART 2) ------------------------------------
@@ -459,6 +1077,23 @@ def test_idle_unload_checks_both_models_in_one_pass(qapp, store, settings):
 
     assert fake_embedder.unloaded is True
     assert fake_ocr.unloaded is True
+
+
+def test_idle_unload_releases_native_heap_after_models_unload(
+    qapp, store, settings, monkeypatch
+):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    runtime._text_embedder = FakeEmbedder()
+    runtime._last_activity = time.monotonic() - 120
+    released = []
+    monkeypatch.setattr(
+        "keeps.ai.runtime._release_unused_heap_memory", lambda: released.append(True)
+    )
+
+    runtime._check_idle_unload()
+
+    assert released == [True]
 
 
 def test_idle_unload_waits_for_active_ai_work(qapp, store, settings):
