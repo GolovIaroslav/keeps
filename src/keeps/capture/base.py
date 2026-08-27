@@ -5,11 +5,19 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import Callable
+from html.parser import HTMLParser
 
 from keeps.text_encoding import decode_unicode_escapes, normalize_plain_text
 
-__all__ = ["decode_unicode_escapes", "normalize_plain_text"]
+__all__ = [
+    "decode_unicode_escapes",
+    "extract_text_from_html",
+    "find_plain_text_mime",
+    "has_plain_text",
+    "normalize_plain_text",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +25,22 @@ MIME_PLAIN = "text/plain"
 MIME_HTML = "text/html"
 MIME_IMAGE = "image/png"
 MIME_URI_LIST = "text/uri-list"
+
+# All mime types that represent plain text, in priority order:
+PLAIN_MIME_CANDIDATES = (
+    "text/plain;charset=utf-8",
+    "text/plain;charset=UTF-8",
+    "text/plain; charset=utf-8",
+    "text/plain; charset=UTF-8",
+    "UTF8_STRING",
+    "text/plain",
+    "TEXT",
+    "STRING",
+)
+
+_CHARSET_RE = re.compile(
+    r"(?:^|;)\s*charset\s*=\s*[\"']?([^;\"'\s]+)", re.IGNORECASE
+)
 
 DEFAULT_MAX_ITEM_MB = 10
 EXTRA_MIME_MAX_BYTES = 1024 * 1024
@@ -56,6 +80,95 @@ _REAL_FORMATTING_TAGS = frozenset(
 )
 
 
+def find_plain_text_mime(available: set[str]) -> str | None:
+    """Find the best matching plain-text MIME type from available formats."""
+    for candidate in PLAIN_MIME_CANDIDATES[:5]:
+        if candidate in available:
+            return candidate
+
+    # Any declared charset is stronger evidence than an unqualified
+    # text/plain fallback. This matters when producers advertise both.
+    for mime in sorted(available):
+        if mime.lower().startswith("text/plain") and _CHARSET_RE.search(mime):
+            return mime
+
+    for candidate in (MIME_PLAIN, "TEXT", "STRING"):
+        if candidate in available:
+            return candidate
+
+    for mime in sorted(available):
+        norm = mime.lower().replace(" ", "")
+        if norm in ("text/plain;charset=utf-8", "utf8_string", "text/plain"):
+            return mime
+    for mime in sorted(available):
+        if mime.lower().startswith("text/plain"):
+            return mime
+    return None
+
+
+def has_plain_text(available: set[str]) -> bool:
+    """True if any supported plain-text MIME type is present in available."""
+    return find_plain_text_mime(available) is not None
+
+
+def _plain_text_encoding_hint(mime: str) -> str | None:
+    if mime == "UTF8_STRING":
+        return "utf-8"
+    if mime == "STRING":
+        return "iso-8859-1"
+    match = _CHARSET_RE.search(mime)
+    return match.group(1) if match is not None else None
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.result: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in ("script", "style", "head"):
+            self._skip_depth += 1
+        elif self._skip_depth == 0 and tag in (
+            "p",
+            "br",
+            "div",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "li",
+            "tr",
+        ):
+            self.result.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in ("script", "style", "head") and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self.result.append(data)
+
+
+def extract_text_from_html(html_bytes: bytes) -> str:
+    """Extract clean plain text from HTML bytes, stripping tags and normalizing Unicode."""
+    html_text = html_bytes.decode("utf-8", errors="replace")
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(html_text)
+        parser.close()
+        text = "".join(parser.result)
+    except Exception:
+        text = re.sub(r"<[^>]+>", "", html_text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n", "\n", text).strip()
+    return unicodedata.normalize("NFC", text)
+
+
 def html_has_real_formatting(html_bytes: bytes) -> bool:
     """True if html contains tags beyond a trivial wrapper.
 
@@ -83,12 +196,12 @@ def detect_kind(available: set[str], html_bytes: bytes | None = None) -> str | N
     if MIME_HTML in available:
         if (
             html_bytes is not None
-            and MIME_PLAIN in available
+            and has_plain_text(available)
             and not html_has_real_formatting(html_bytes)
         ):
             return "text"
         return "html"
-    if MIME_PLAIN in available:
+    if has_plain_text(available):
         return "text"
     return None
 
@@ -98,9 +211,26 @@ def select_bundle(
 ) -> dict[str, bytes]:
     """Read the mime types relevant to `kind` via `reader` (side-effecting, injectable)."""
     bundle = {}
+    if kind == "text":
+        plain_mime = find_plain_text_mime(available)
+        if plain_mime is not None:
+            bundle[MIME_PLAIN] = reader(plain_mime)
+        return bundle
+    if kind == "html":
+        if MIME_HTML in available:
+            bundle[MIME_HTML] = reader(MIME_HTML)
+        plain_mime = find_plain_text_mime(available)
+        if plain_mime is not None:
+            bundle[MIME_PLAIN] = reader(plain_mime)
+        return bundle
     for mime in _MIMES_FOR_KIND[kind]:
         if mime in available:
-            bundle[mime] = reader(mime)
+            if mime == MIME_PLAIN:
+                plain_mime = find_plain_text_mime(available)
+                if plain_mime is not None:
+                    bundle[MIME_PLAIN] = reader(plain_mime)
+            else:
+                bundle[mime] = reader(mime)
     return bundle
 
 
@@ -125,8 +255,14 @@ def build_bundle(
     def read(mime: str) -> bytes:
         if mime not in cache:
             cache[mime] = reader(mime)
-            if mime == MIME_PLAIN:
-                cache[mime] = normalize_plain_text(cache[mime])
+            if (
+                mime == MIME_PLAIN
+                or mime in PLAIN_MIME_CANDIDATES
+                or mime.lower().startswith("text/plain")
+            ):
+                cache[mime] = normalize_plain_text(
+                    cache[mime], _plain_text_encoding_hint(mime)
+                )
         return cache[mime]
 
     kind = detect_kind(available)
@@ -137,8 +273,13 @@ def build_bundle(
         kind = detect_kind(available, html_bytes)
         if kind == "html":
             bundle = {MIME_HTML: html_bytes}
-            if MIME_PLAIN in available:
-                bundle[MIME_PLAIN] = read(MIME_PLAIN)
+            plain_mime = find_plain_text_mime(available)
+            if plain_mime is not None:
+                bundle[MIME_PLAIN] = read(plain_mime)
+            elif html_bytes:
+                fallback = extract_text_from_html(html_bytes)
+                if fallback:
+                    bundle[MIME_PLAIN] = fallback.encode("utf-8")
         else:
             bundle = select_bundle(kind, available, read)
     else:

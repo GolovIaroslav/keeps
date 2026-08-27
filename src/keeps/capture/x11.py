@@ -115,7 +115,17 @@ class X11Watcher(QObject):
 
     def _read_mime(self, mime: str) -> bytes:
         if mime == MIME_PLAIN:
+            # This canonical fallback is synthesized from QMimeData.hasText(),
+            # so Qt has already decoded the platform selection for us.
             return self._mime_data.text().encode("utf-8")
+        if mime in ("UTF8_STRING", "TEXT", "STRING") or mime.lower().startswith(
+            "text/plain"
+        ):
+            # Preserve the bytes of explicitly advertised text formats. The
+            # capture layer can then honor a declared charset instead of
+            # decoding through Qt and accidentally applying that charset a
+            # second time to already-UTF-8 data.
+            return bytes(self._mime_data.data(mime))
         if mime == MIME_HTML:
             return self._mime_data.html().encode("utf-8")
         if mime == MIME_URI_LIST:
