@@ -805,7 +805,7 @@ class SettingsDialog(QDialog):
         rag_box = QCheckBox()
         rag_box.setChecked(bool(config.get(self._settings, "ai/rag_text_enabled")))
         rag_box.toggled.connect(self._on_rag_toggled)
-        toggles.addRow(self.tr("Semantic search (RAG) over clip text"), rag_box)
+        toggles.addRow(self.tr("Meaning search (text and OCR)"), rag_box)
 
         ocr_box = QCheckBox()
         ocr_box.setChecked(bool(config.get(self._settings, "ai/ocr_enabled")))

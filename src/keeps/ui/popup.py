@@ -140,14 +140,14 @@ def _local_hotkey_error(sequence_text: str, reserved: set[str]) -> str | None:
     return "modifier-required"
 
 _MODE_LABELS = {
-    ranking.SearchMode.BLENDED: "auto",
+    ranking.SearchMode.BLENDED: "combined",
     ranking.SearchMode.KEYWORD: "keywords",
     ranking.SearchMode.SEMANTIC: "meaning",
 }
 
 _MODE_DESCRIPTIONS = {
     ranking.SearchMode.BLENDED: (
-        "Auto: keyword matches first, then semantically related results."
+        "Combined: rank fusion of keyword matches and semantically related results."
     ),
     ranking.SearchMode.KEYWORD: (
         "Keywords: fast exact-text search without loading the semantic model."
@@ -1790,15 +1790,20 @@ class PopupWindow(QWidget):
         self._sort_button.setText(self.tr(_SORT_ORDER_LABELS[order]))
         for action in self._sort_menu.actions():
             action.setChecked(action.data() == order)
-        meaning_only = (
-            self._ai_runtime is not None
-            and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
+        mode = (
+            self._ai_runtime.search_mode
+            if self._ai_runtime is not None else ranking.SearchMode.KEYWORD
         )
-        self._sort_button.setEnabled(not meaning_only)
-        self._sort_button.setToolTip(
-            self.tr("Keyword results order (Meaning uses similarity)")
-            if not meaning_only else self.tr("Meaning results are sorted by similarity")
-        )
+        is_keywords = mode == ranking.SearchMode.KEYWORD
+        self._sort_button.setEnabled(is_keywords)
+        self._sort_button.setVisible(is_keywords)
+        if mode == ranking.SearchMode.BLENDED:
+            tooltip = self.tr("Combined results use keyword and semantic ranks")
+        elif mode == ranking.SearchMode.SEMANTIC:
+            tooltip = self.tr("Meaning results are sorted by similarity")
+        else:
+            tooltip = self.tr("Order keyword results")
+        self._sort_button.setToolTip(tooltip)
 
     def _update_mode_combo(self) -> None:
         semantic_on = self._ai_runtime is not None and (

@@ -15,6 +15,7 @@ DEFAULT_THRESHOLD = 0.35
 IMAGE_THRESHOLD = 0.06
 DEFAULT_TOP_N = 20
 RRF_K = 60
+KEYWORD_RRF_WEIGHT = 1.2
 
 
 def reciprocal_rank_fusion(
@@ -94,8 +95,8 @@ def blend(
     - KEYWORD: substring results only, untouched order (RAG never consulted).
     - SEMANTIC: pure cosine ranking (score >= threshold), substring match
       plays no role -- an item with no substring match can still surface.
-    - BLENDED (default): substring hits first in their existing order, then
-      semantic hits (score >= threshold, highest first) not already present.
+    - BLENDED: weighted reciprocal-rank fusion across literal and semantic
+      rankings, with extra weight for the more predictable literal matches.
     """
     if mode == SearchMode.KEYWORD:
         return list(substring_clips)
@@ -105,6 +106,48 @@ def blend(
     if mode == SearchMode.SEMANTIC:
         return semantic_ranked
 
-    seen_ids = {clip.id for clip in substring_clips}
-    extra = [clip for clip in semantic_ranked if clip.id not in seen_ids]
-    return list(substring_clips) + extra
+    if not semantic_ranked:
+        return list(substring_clips)
+
+    semantic_rank = {
+        clip.id: rank for rank, clip in enumerate(semantic_ranked, start=1)
+    }
+    # A keyword-only hit below this rank cannot beat even the weakest
+    # admitted semantic result. Keep the rest in its original order.
+    cutoff = min(
+        len(substring_clips),
+        int(KEYWORD_RRF_WEIGHT * (RRF_K + len(semantic_ranked)) - RRF_K) + 1,
+    )
+    keyword_rank: dict[int, int] = {}
+    candidates: dict[int, Clip] = {}
+    for rank, clip in enumerate(substring_clips, start=1):
+        if rank <= cutoff or clip.id in semantic_rank:
+            keyword_rank[clip.id] = rank
+            candidates[clip.id] = clip
+    for clip in semantic_ranked:
+        candidates.setdefault(clip.id, clip)
+
+    scores = {
+        clip_id: (
+            KEYWORD_RRF_WEIGHT / (RRF_K + keyword_rank[clip_id])
+            if clip_id in keyword_rank else 0.0
+        ) + (
+            1.0 / (RRF_K + semantic_rank[clip_id])
+            if clip_id in semantic_rank else 0.0
+        )
+        for clip_id in candidates
+    }
+    ranked = sorted(
+        candidates.values(),
+        key=lambda clip: (
+            -scores[clip.id],
+            keyword_rank.get(clip.id, float("inf")),
+            semantic_rank.get(clip.id, float("inf")),
+            -clip.last_used_at,
+            -clip.id,
+        ),
+    )
+    return ranked + [
+        clip for clip in substring_clips[cutoff:]
+        if clip.id not in semantic_rank
+    ]

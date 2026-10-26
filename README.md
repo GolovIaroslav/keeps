@@ -11,7 +11,7 @@ Existing Linux clipboard managers never quite matched the Ditto experience on Wi
 - **Instant popup** on a global hotkey (`Ctrl+`` by default), on the monitor you're working on.
 - **Auto-paste**: pick an item, it's pasted straight into the window you came from. No extra Ctrl+V.
 - **Readable history**: multi-line previews (up to 3 lines), image thumbnails, full preview on hover.
-- **Search as you type**, Cyrillic-aware.
+- **Search as you type**, Cyrillic-aware. Filter All / Text / Images / Files, and order keyword results by Newest, Best match, or Oldest.
 - **Predictable ordering**: a used item always jumps to the top. Always.
 - **Multi-format**: plain text, rich text (HTML), images, file lists. Optionally preserve extra source MIME formats too. Paste-as-plain-text with one key.
 - History in SQLite (survives reboots), pinned items, tray icon, autostart, GUI settings, and a configurable popup keymap.
@@ -53,7 +53,11 @@ uv run keeps
 
 The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; a single clip is exported in its real format (for example an image as PNG), while `Export as Keeps archive...` creates a portable `.keeps.json` backup. Use the popup title bar to create or import clips. Settings (including the scrollable `Paste` tab, popup keymap, per-clip shortcuts, and persistent copy buffers) live at `~/.config/keeps/keeps.ini`. The default interface language is English; `Settings → General → Language` also offers Russian, Spanish, German, French, Brazilian Portuguese, Simplified Chinese, and Japanese. Restart Keeps after changing it.
 
-AI indexing uses one background worker so OCR and text embeddings cannot multiply model memory across the process-wide Qt thread pool. `Settings → AI → Unload model from RAM after idle` defaults to 10 minutes; set it to `0` only if you explicitly want models to stay loaded. Loading a model again on the next OCR or semantic query is automatic.
+AI search has three modes: **Keywords** (literal matches, including existing OCR text), **Meaning** (semantic similarities), and **Combined** (weighted rank fusion across keyword and semantic results). The type filter is independent of the mode. Keyword sorting changes only literal results; Meaning always sorts by similarity.
+
+The popup has an **Auto-index** checkbox and an **Index missing** button with a pending counter. Auto-index updates OCR and embeddings in the background even when Keywords is selected. Turning it off pauses new work; previously indexed items remain searchable. `Index missing` performs a one-off catch-up without permanently enabling background indexing. A warning appears after three days of paused indexing with work outstanding. Enabled AI models must already be downloaded in Settings; turning off an individual AI capability also stops its indexing. Model downloads are user-initiated.
+
+Indexing uses one background worker to bound simultaneous model memory use. `Settings → AI → Unload model from RAM after idle` defaults to 10 minutes; set it to `0` only if you explicitly want models to stay loaded. Loading a model again on the next OCR or semantic query is automatic.
 
 ### Popup keymap
 
@@ -69,7 +73,7 @@ AI indexing uses one background worker so OCR and text embeddings cannot multipl
 | `Ctrl+E` | edit in an external editor |
 | `Ctrl+P` | pin/unpin |
 | `Ctrl+1..9` | paste the Nth visible item |
-| `Ctrl+M` | cycle search mode: auto → keywords → meaning (only when AI text search is enabled) |
+| `Ctrl+M` | cycle search mode: keywords → combined → meaning (when semantic search is enabled) |
 | `Esc` / focus loss | hide popup |
 
 On KDE, the global hotkey is registered via KGlobalAccel; on plain X11 desktops it falls back to a direct XGrabKey. On other Wayland compositors, Keeps tries the XDG GlobalShortcuts portal and falls back to a compositor-bound `keeps toggle` shortcut if the portal is unavailable or declined.

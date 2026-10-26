@@ -182,6 +182,18 @@ assert ("manual",) in runtime.calls
 popup._auto_index_box.click()
 assert ("toggle", True) in runtime.calls
 assert popup._auto_index_box.isChecked() is True
+runtime.search_mode = SearchMode.BLENDED
+popup._update_mode_combo()
+assert not popup._sort_button.isEnabled()
+assert not popup._sort_button.isVisible()
+runtime.search_mode = SearchMode.SEMANTIC
+popup._update_mode_combo()
+assert not popup._sort_button.isEnabled()
+assert not popup._sort_button.isVisible()
+runtime.search_mode = SearchMode.KEYWORD
+popup._update_mode_combo()
+assert popup._sort_button.isEnabled()
+assert popup._sort_button.isVisible()
 runtime.indexable_missing_counts = lambda: {"text": 0, "images": 0, "ocr": 0}
 popup._refresh_index_status()
 assert not popup._index_missing_button.isEnabled()
