@@ -84,6 +84,11 @@ bundle_system_libraries() {
             libQt6*.so*|libQt5*.so*)
                 continue
                 ;;
+            # Keep fontconfig at the desktop boundary: an older bundled
+            # library cannot parse newer host /etc/fonts configuration files.
+            libfontconfig.so.*)
+                continue
+                ;;
             libc.so.6|libdl.so.2|libm.so.6|libpthread.so.0|librt.so.1|libutil.so.1|\
             ld-linux-*.so.*|libGL.so.1|libEGL.so.1|libGLX.so.0|libGLdispatch.so.0)
                 continue
@@ -213,6 +218,8 @@ mkdir -p "$VERIFY_DIR"
     cd "$VERIFY_DIR"
     APPIMAGELAUNCHER_DISABLE=1 "$OUTPUT" --appimage-extract >/dev/null
     test -f squashfs-root/usr/python312/lib/python3.12/encodings/__init__.py
+    test ! -e squashfs-root/usr/lib/libQt6Core.so.6
+    test ! -e squashfs-root/usr/lib/libfontconfig.so.1
     PYTHONHOME=/nonexistent-python-home PYTHONPATH=/nonexistent-python-path \
         squashfs-root/AppRun --version | grep -Fx "$VERSION" >/dev/null
     PYTHONHOME=/nonexistent-python-home PYTHONPATH=/nonexistent-python-path \
