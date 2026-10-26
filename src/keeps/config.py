@@ -36,6 +36,7 @@ DEFAULTS: dict[str, bool | int | str] = {
     ),
     "popup/keep_search_after_paste": False,
     "popup/keyword_short_first": True,
+    "popup/search_sort_order": "recent",
     "buffers/1/copy_hotkey": "",
     "buffers/1/paste_hotkey": "",
     "buffers/2/copy_hotkey": "",

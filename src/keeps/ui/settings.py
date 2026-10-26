@@ -369,17 +369,23 @@ class SettingsDialog(QDialog):
         )
         form.addRow(self.tr("Keep search after paste"), keep_search)
 
-        short_keywords = QCheckBox()
-        short_keywords.setChecked(
-            bool(config.get(self._settings, "popup/keyword_short_first"))
+        keyword_order = QComboBox()
+        for value, label in (
+            ("recent", "Newest"),
+            ("relevance", "Best match"),
+            ("oldest", "Oldest"),
+        ):
+            keyword_order.addItem(self.tr(label), value)
+        keyword_order.setCurrentIndex(
+            keyword_order.findData(config.get(self._settings, "popup/search_sort_order"))
         )
-        short_keywords.setToolTip(
-            self.tr("Prefer compact clips where the query makes up more of the text")
+        keyword_order.setToolTip(self.tr("Applies to keyword matches, not Meaning"))
+        keyword_order.currentIndexChanged.connect(
+            lambda index: self._save(
+                "popup/search_sort_order", keyword_order.itemData(index)
+            )
         )
-        short_keywords.toggled.connect(
-            lambda v: self._save("popup/keyword_short_first", v)
-        )
-        form.addRow(self.tr("Short keyword matches first"), short_keywords)
+        form.addRow(self.tr("Keyword result order"), keyword_order)
 
         multi_separator = QLineEdit(
             multi_paste.separator_to_display(

@@ -27,6 +27,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QGuiApplication,
     QIcon,
     QKeyEvent,
@@ -164,6 +165,13 @@ _CONTENT_FILTER_LABELS = {
     "all": "All",
     "text": "Text",
     "images": "Images",
+    "files": "Files",
+}
+
+_SORT_ORDER_LABELS = {
+    "recent": "Newest",
+    "relevance": "Best match",
+    "oldest": "Oldest",
 }
 
 
@@ -189,6 +197,7 @@ class ClipListModel(QAbstractListModel):
         self._pasted_ids: set[int] = set()
         self._scope = "history"
         self._content_filter = "all"
+        self._sort_order = str(config.get(self._settings, "popup/search_sort_order"))
         if self._ai_runtime is not None and hasattr(
             self._ai_runtime, "semantic_index_changed"
         ):
@@ -246,12 +255,25 @@ class ClipListModel(QAbstractListModel):
         self._content_filter = content_filter
         self._rebuild()
 
+    @property
+    def sort_order(self) -> str:
+        return self._sort_order
+
+    def set_sort_order(self, order: str) -> None:
+        if order not in _SORT_ORDER_LABELS:
+            raise ValueError(f"unknown sort order: {order}")
+        if order != self._sort_order:
+            self._sort_order = order
+            self._rebuild()
+
     def _matches_content_filter(self, clip: Clip) -> bool:
         if self._content_filter == "all":
             return True
         if self._content_filter == "text":
             return clip.kind in ("text", "html")
-        return clip.kind == "image"
+        if self._content_filter == "images":
+            return clip.kind == "image"
+        return clip.kind == "files"
 
     def _on_semantic_scores(self, query: str, scores: dict[int, float]) -> None:
         if query != self._current_query:
@@ -261,10 +283,7 @@ class ClipListModel(QAbstractListModel):
 
     def _rebuild(self) -> None:
         substring_clips, keyword_reasons = self._store.search_with_reasons(
-            self._current_query,
-            prefer_short=bool(
-                config.get(self._settings, "popup/keyword_short_first")
-            ),
+            self._current_query, sort_order=self._sort_order
         )
         substring_clips = [
             clip for clip in substring_clips if self._matches_content_filter(clip)
@@ -522,6 +541,24 @@ class PopupWindow(QWidget):
         title_bar_layout.addWidget(self._count_label)
         self.model.modelReset.connect(self._update_count_label)
         title_bar_layout.addStretch(1)
+        self._sort_menu = QMenu(self._title_bar)
+        sort_group = QActionGroup(self._sort_menu)
+        sort_group.setExclusive(True)
+        for order, label in _SORT_ORDER_LABELS.items():
+            action = self._sort_menu.addAction(self.tr(label))
+            action.setCheckable(True)
+            action.setData(order)
+            sort_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, value=order: self._select_sort_order(value)
+            )
+        self._sort_button = QToolButton(self._title_bar)
+        self._sort_button.setAccessibleName(self.tr("Sort keyword matches"))
+        self._sort_button.setMenu(self._sort_menu)
+        self._sort_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._sort_button.setAutoRaise(True)
+        title_bar_layout.addWidget(self._sort_button)
+        self._update_sort_button()
         settings_button = QToolButton(self._title_bar)
         settings_button.setIcon(QIcon.fromTheme("configure"))
         settings_button.setToolTip(self.tr("Settings..."))
@@ -621,6 +658,8 @@ class PopupWindow(QWidget):
     def apply_settings(self) -> None:
         """Refresh this window's QSettings view and live local bindings."""
         self._settings.sync()
+        self.model.set_sort_order(str(config.get(self._settings, "popup/search_sort_order")))
+        self._update_sort_button()
         self._refresh_local_hotkeys()
         self.refresh()
 
@@ -1641,6 +1680,32 @@ class PopupWindow(QWidget):
         content_filter = self._content_filter_combo.itemData(index)
         if content_filter is not None:
             self.model.set_content_filter(str(content_filter))
+            self._update_count_label()
+            self._select_row(0)
+            self.search_edit.setFocus()
+
+    def _select_sort_order(self, order: str) -> None:
+        self.model.set_sort_order(order)
+        self._settings.setValue("popup/search_sort_order", order)
+        self._update_sort_button()
+        self._update_count_label()
+        self._select_row(0)
+        self.search_edit.setFocus()
+
+    def _update_sort_button(self) -> None:
+        order = self.model.sort_order
+        self._sort_button.setText(self.tr(_SORT_ORDER_LABELS[order]))
+        for action in self._sort_menu.actions():
+            action.setChecked(action.data() == order)
+        meaning_only = (
+            self._ai_runtime is not None
+            and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
+        )
+        self._sort_button.setEnabled(not meaning_only)
+        self._sort_button.setToolTip(
+            self.tr("Keyword results order (Meaning uses similarity)")
+            if not meaning_only else self.tr("Meaning results are sorted by similarity")
+        )
 
     def _update_mode_combo(self) -> None:
         semantic_on = self._ai_runtime is not None and (
@@ -1654,6 +1719,7 @@ class PopupWindow(QWidget):
         self._mode_combo.setCurrentIndex(index)
         self._mode_combo.blockSignals(False)
         self._mode_combo.setToolTip(self.tr(_MODE_DESCRIPTIONS[mode]))
+        self._update_sort_button()
 
     # -- UI scale (Ctrl+scroll / Ctrl+Plus / Ctrl+Minus, §6) ----------------
 
