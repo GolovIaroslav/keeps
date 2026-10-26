@@ -857,11 +857,22 @@ class Store:
         return self.search_with_reasons(query)[0]
 
     def search_with_reasons(
-        self, query: str, *, prefer_short: bool = False
+        self,
+        query: str,
+        *,
+        prefer_short: bool = False,
+        sort_order: str | None = None,
     ) -> tuple[list[Clip], dict[int, MatchReason]]:
-        """Full-content, casefolded AND search plus exact/OCR match reasons."""
+        """Full-content search with explicit result ordering.
+
+        Explicit sort_order overrides the legacy prefer_short argument.
+        """
+        if sort_order is not None and sort_order not in ("recent", "oldest", "relevance"):
+            raise ValueError(f"unknown sort order: {sort_order}")
+        order = sort_order or ("relevance" if prefer_short else "recent")
         if not query.strip():
-            return self.all(), {}
+            clips = self.all()
+            return (list(reversed(clips)) if order == "oldest" else clips), {}
         reasons = self._search_index.search(query)
         if not reasons:
             return [], reasons
@@ -879,8 +890,11 @@ class Store:
                     f"SELECT * FROM clips WHERE id IN ({placeholders})", batch
                 ).fetchall()
             )
-        rows.sort(key=lambda row: (row["last_used_at"], row["id"]), reverse=True)
-        if prefer_short:
+        rows.sort(
+            key=lambda row: (row["last_used_at"], row["id"]),
+            reverse=order != "oldest",
+        )
+        if order == "relevance":
             rows.sort(
                 key=lambda row: self._search_index.keyword_rank(
                     row["id"], query, reasons[row["id"]]

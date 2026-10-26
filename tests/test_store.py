@@ -248,6 +248,43 @@ def test_keyword_search_can_prefer_short_dense_matches(store):
     assert [clip.id for clip in dense] == [short, long]
 
 
+def test_keyword_search_supports_explicit_sort_order(store):
+    older = store.add("text", {"text/plain": b"/home/jar/projects"})
+    middle = store.add("text", {"text/plain": b"projects from an older note"})
+    newer = store.add(
+        "text",
+        {"text/plain": b"projects " + (b"long prompt filler " * 100)},
+    )
+
+    recent, _ = store.search_with_reasons("projects", sort_order="recent")
+    oldest, _ = store.search_with_reasons("projects", sort_order="oldest")
+    relevant, _ = store.search_with_reasons("projects", sort_order="relevance")
+    override, _ = store.search_with_reasons(
+        "projects", prefer_short=True, sort_order="recent"
+    )
+
+    assert [clip.id for clip in recent] == [newer, middle, older]
+    assert [clip.id for clip in oldest] == [older, middle, newer]
+    assert relevant[0].id == older
+    assert [clip.id for clip in override] == [newer, middle, older]
+
+
+def test_keyword_search_orders_empty_query_without_losing_entries(store):
+    oldest = store.add("text", {"text/plain": b"first"})
+    newest = store.add("image", {"image/png": b"fake image"})
+
+    recent, _ = store.search_with_reasons("", sort_order="recent")
+    reversed_results, _ = store.search_with_reasons("", sort_order="oldest")
+
+    assert [clip.id for clip in recent] == [newest, oldest]
+    assert [clip.id for clip in reversed_results] == [oldest, newest]
+
+
+def test_keyword_search_rejects_invalid_sort_order(store):
+    with pytest.raises(ValueError, match="sort order"):
+        store.search_with_reasons("x", sort_order="random")
+
+
 def test_count_in_scope_does_not_need_to_hydrate_clips(store):
     first = store.add("text", {"text/plain": b"first"})
     store.add("text", {"text/plain": b"second"})
