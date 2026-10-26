@@ -261,6 +261,7 @@ class AiRuntime(QObject):
     """
 
     semantic_index_changed = Signal()
+    ocr_index_changed = Signal()
 
     def __init__(self, store: Store, settings, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -279,6 +280,7 @@ class AiRuntime(QObject):
         self._query_task_active = False
         self._pending_query_request = None
         self._completed_semantic_tasks = {"text": 0, "image": 0}
+        self._completed_ocr_tasks = 0
         self._text_embed_backlog: deque[int] = deque()
         self._image_embed_backlog: deque[int] = deque()
         self._ocr_backlog: deque[int] = deque()
@@ -1012,6 +1014,15 @@ class AiRuntime(QObject):
             self._maybe_finish_manual_index()
             return
         self._store.set_ocr_text(clip_id, text)
+        self._completed_ocr_tasks += 1
+        if (
+            self._completed_ocr_tasks % SEMANTIC_REFRESH_BATCH == 0
+            or (
+                not self._ocr_backlog
+                and not any(kind == "ocr" for kind, _ in self._pending_ai_tasks)
+            )
+        ):
+            self.ocr_index_changed.emit()
         if vec_bytes is not None:
             self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
         elif self._index_work_enabled and self.rag_text_enabled and text.strip():

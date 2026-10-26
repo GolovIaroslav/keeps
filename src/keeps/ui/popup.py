@@ -206,6 +206,10 @@ class ClipListModel(QAbstractListModel):
             self._ai_runtime.semantic_index_changed.connect(
                 self.refresh_semantic_scores
             )
+        if self._ai_runtime is not None and hasattr(
+            self._ai_runtime, "ocr_index_changed"
+        ):
+            self._ai_runtime.ocr_index_changed.connect(self._rebuild)
 
     @property
     def pasted_ids(self) -> frozenset[int]:
@@ -287,9 +291,10 @@ class ClipListModel(QAbstractListModel):
         substring_clips, keyword_reasons = self._store.search_with_reasons(
             self._current_query, sort_order=self._sort_order
         )
-        substring_clips = [
-            clip for clip in substring_clips if self._matches_content_filter(clip)
-        ]
+        substring_clips = self._store.clips_in_scope(
+            self._scope,
+            [clip for clip in substring_clips if self._matches_content_filter(clip)],
+        )
         rag_active = (
             self._ai_runtime is not None
             and (
@@ -301,11 +306,17 @@ class ClipListModel(QAbstractListModel):
         )
         if rag_active:
             semantic_ids = list(self._semantic_scores)
-            clips_by_id = {
-                clip.id: clip
-                for clip in self._store.clips_by_ids(semantic_ids)
-                if self._matches_content_filter(clip)
-            }
+            # Filter by scope before semantic top-N admission. Filtering only
+            # the final result would drop matches ranked outside the global
+            # top 20 even if they are the best matches in this tab.
+            eligible = self._store.clips_in_scope(
+                self._scope,
+                [
+                    clip for clip in self._store.clips_by_ids(semantic_ids)
+                    if self._matches_content_filter(clip)
+                ],
+            )
+            clips_by_id = {clip.id: clip for clip in eligible}
             clips = ranking.blend(
                 substring_clips,
                 self._semantic_scores,

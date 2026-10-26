@@ -214,3 +214,55 @@ store.close()
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+def test_scoped_semantic_search_admits_hits_outside_global_top_twenty(tmp_path):
+    script = r'''
+from pathlib import Path
+from types import SimpleNamespace
+from PySide6.QtWidgets import QApplication
+from keeps.ai.ranking import SearchMode
+from keeps.store import Store
+from keeps.ui.popup import ClipListModel
+
+app = QApplication([])
+store = Store(Path("store.db"))
+group = store.create_group("Saved")
+target = store.add("text", {"text/plain": b"unrelated recording"})
+store.set_group_many([target], group)
+store.set_pinned(target, True)
+others = [
+    store.add("text", {"text/plain": f"record {i}".encode()})
+    for i in range(30)
+]
+scores = {clip_id: 0.99 - index * 0.01 for index, clip_id in enumerate(others)}
+scores[target] = 0.51
+runtime = SimpleNamespace(
+    rag_text_enabled=True,
+    image_semantic_enabled=False,
+    ocr_enabled=False,
+    search_mode=SearchMode.SEMANTIC,
+    encode_query_async=lambda query, cb: cb(query, scores),
+)
+model = ClipListModel(store, runtime)
+for mode in (SearchMode.SEMANTIC, SearchMode.BLENDED):
+    runtime.search_mode = mode
+    for scope in (f"group:{group}", "pinned"):
+        model.set_scope(scope)
+        model.set_query("missing query")
+        assert [model.clip_at(i).id for i in range(model.rowCount())] == [target], (
+            mode, scope
+        )
+store.close()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ | {
+            "QT_QPA_PLATFORM": "offscreen",
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

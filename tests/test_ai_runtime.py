@@ -1370,3 +1370,19 @@ def test_disabling_ocr_discards_inflight_without_stopping_other_indexing(
     settings.setValue("ai/ocr_enabled", True)
     runtime.ocr_capabilities_changed()
     assert _pump_until(qapp, lambda: not store.clips_missing_ocr())
+
+def test_ocr_completion_updates_active_keyword_search(qapp, store, settings):
+    from keeps.ui.popup import ClipListModel
+
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    runtime._ocr_engine = FakeOcrEngine("needle recognized in image")
+    model = ClipListModel(store, runtime)
+    model.set_query("needle")
+    assert model.rowCount() == 0
+
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+
+    assert _pump_until(qapp, lambda: not store.clips_missing_ocr())
+    assert _pump_until(qapp, lambda: model.rowCount() == 1)
+    assert model.clip_at(0).id == clip_id
