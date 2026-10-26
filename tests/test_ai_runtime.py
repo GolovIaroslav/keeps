@@ -1315,3 +1315,58 @@ def test_missing_model_does_not_queue_failed_indexing_jobs(
     assert not runtime._image_embed_backlog
     assert runtime.missing_index_counts()["text"] == 1
     assert runtime.missing_index_counts()["images"] == 1
+
+
+def test_pausing_auto_index_discards_inflight_ocr_result(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    ocr = BlockingOcrEngine("should not persist")
+    runtime._ocr_engine = ocr
+    image = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(image, "image")
+    assert ocr.started.wait(timeout=2)
+
+    runtime.set_auto_index_enabled(False)
+    ocr.release.set()
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+    assert store.clips_missing_ocr() == [image]
+
+    assert runtime.index_missing_now() == 1
+    assert _pump_until(qapp, lambda: not store.clips_missing_ocr())
+    assert runtime.auto_index_enabled is False
+
+
+def test_reenable_during_cancelled_ocr_retries_missing_clip(qapp, store, settings):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    ocr = BlockingOcrEngine("valid after reenable")
+    runtime._ocr_engine = ocr
+    image = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(image, "image")
+    assert ocr.started.wait(timeout=2)
+
+    runtime.set_auto_index_enabled(False)
+    runtime.set_auto_index_enabled(True)
+    ocr.release.set()
+
+    assert _pump_until(qapp, lambda: not store.clips_missing_ocr())
+    assert ocr.calls == 2
+
+
+def test_disabling_ocr_discards_inflight_without_stopping_other_indexing(
+    qapp, store, settings
+):
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    ocr = BlockingOcrEngine("stale scan")
+    runtime._ocr_engine = ocr
+    image = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(image, "image")
+    assert ocr.started.wait(timeout=2)
+
+    settings.setValue("ai/ocr_enabled", False)
+    runtime.ocr_capabilities_changed()
+    ocr.release.set()
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+    assert store.clips_missing_ocr() == [image]
+
+    settings.setValue("ai/ocr_enabled", True)
+    runtime.ocr_capabilities_changed()
+    assert _pump_until(qapp, lambda: not store.clips_missing_ocr())

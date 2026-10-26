@@ -205,8 +205,10 @@ class _OcrTask(QRunnable):
         source_hash: str,
         png_bytes: bytes,
         signals: _OcrSignals,
+        is_current,
     ) -> None:
         super().__init__()
+        self._is_current = is_current
         self._ocr_engine = ocr_engine
         self._clip_id = clip_id
         self._source_hash = source_hash
@@ -214,13 +216,21 @@ class _OcrTask(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
+        if not self._is_current():
+            self._signals.finished.emit(self._clip_id, self._source_hash, False, None)
+            return
         try:
             text = self._ocr_engine.extract_text(self._png_bytes)
         except Exception:
             logger.exception("OCR failed for clip %s", self._clip_id)
             self._signals.finished.emit(self._clip_id, self._source_hash, None, None)
             return
-        self._signals.finished.emit(self._clip_id, self._source_hash, text, None)
+        self._signals.finished.emit(
+            self._clip_id,
+            self._source_hash,
+            text if self._is_current() else False,
+            None,
+        )
 
 
 def available_ocr_language_codes(
@@ -263,6 +273,7 @@ class AiRuntime(QObject):
         self._last_activity = 0.0
         self._semantic_generation = 0
         self._index_generation = 0
+        self._ocr_generation = 0
         self._manual_index_active = False
         self._query_generation = 0
         self._query_task_active = False
@@ -376,6 +387,7 @@ class AiRuntime(QObject):
         else:
             self._manual_index_active = False
             self._index_generation += 1
+            self._ocr_generation += 1
             self._text_embed_backlog.clear()
             self._image_embed_backlog.clear()
             self._ocr_backlog.clear()
@@ -416,6 +428,16 @@ class AiRuntime(QObject):
         if self.auto_index_enabled and self.semantic_search_enabled:
             self.run_text_embed_backlog_sweep()
             self.run_image_embed_backlog_sweep()
+
+    def ocr_capabilities_changed(self) -> None:
+        if self.ocr_enabled:
+            if self._index_work_enabled:
+                self.run_ocr_backlog_sweep()
+        else:
+            self._ocr_generation += 1
+            self._ocr_backlog.clear()
+            self._pending_delayed_clip_ids.clear()
+            self._delay_timer.stop()
 
     def semantic_capabilities_changed(self) -> None:
         """Invalidate semantic work/results after a RAG or vision toggle."""
@@ -956,7 +978,11 @@ class AiRuntime(QObject):
             return
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
-        task = _OcrTask(engine, clip_id, source_hash, png_bytes, signals)
+        generation = self._ocr_generation
+        task = _OcrTask(
+            engine, clip_id, source_hash, png_bytes, signals,
+            lambda: self._ocr_generation == generation,
+        )
         self._pending_ai_tasks.add(("ocr", clip_id))
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
@@ -969,6 +995,12 @@ class AiRuntime(QObject):
     ) -> None:
         self._pending_ai_tasks.discard(("ocr", clip_id))
         self._touch_activity()
+        if text is False:
+            if self._index_work_enabled and self.ocr_enabled:
+                self._enqueue_ocr(clip_id, front=True)
+            self._drain_ocr_backlog()
+            self._maybe_finish_manual_index()
+            return
         if self._store.content_hash(clip_id) != source_hash:
             if self._index_work_enabled and self.ocr_enabled:
                 self._enqueue_ocr(clip_id, front=True)

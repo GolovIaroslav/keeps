@@ -877,8 +877,8 @@ class SettingsDialog(QDialog):
 
     def _on_ocr_toggled(self, checked: bool) -> None:
         self._save("ai/ocr_enabled", checked)
-        if checked and self._ai_runtime is not None:
-            self._ai_runtime.run_ocr_backlog_sweep()
+        if self._ai_runtime is not None:
+            self._ai_runtime.ocr_capabilities_changed()
 
     def _on_rag_toggled(self, checked: bool) -> None:
         self._save("ai/rag_text_enabled", checked)
