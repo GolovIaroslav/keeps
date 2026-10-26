@@ -83,7 +83,36 @@ def _reject_json_constant(value: str):
     raise ValueError(f"non-standard JSON constant: {value}")
 
 
+_JSON_MAX_NESTING = 256
+
+
+def _json_nesting_exceeds_limit(text: str) -> bool:
+    depth = 0
+    quoted = False
+    escaped = False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > _JSON_MAX_NESTING:
+                return True
+        elif character in "]}":
+            depth -= 1
+    return False
+
+
 def _pretty_json_or_none(text: str) -> str | None:
+    # Bound pretty-print work independently of Python's JSON recursion behavior.
+    if _json_nesting_exceeds_limit(text):
+        return None
     try:
         value = json.loads(text, parse_constant=_reject_json_constant)
         return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)

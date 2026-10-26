@@ -157,6 +157,18 @@ def test_json_pretty_print_rejects_unserializably_deep_input():
     assert pretty_json(source) == source
 
 
+def test_json_pretty_print_caps_container_depth_on_all_python_versions():
+    source = "[" * 257 + "0" + "]" * 257
+    assert is_valid_json(source) is False
+    assert pretty_json(source) == source
+
+
+def test_json_pretty_print_ignores_brackets_inside_strings():
+    source = '{"value":"' + "[" * 300 + '"}'
+    assert is_valid_json(source) is True
+    assert pretty_json(source).startswith('{\n  "value":')
+
+
 @pytest.mark.parametrize(
     "text,expected",
     [
