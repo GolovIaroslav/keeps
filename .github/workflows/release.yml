@@ -34,7 +34,12 @@ jobs:
 
       - name: Build AppImage
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          # workflow_dispatch runs against branches, not version tags.
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml | head -n 1)"
+          test -n "$VERSION"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$GITHUB_REF_NAME" = "v$VERSION"
+          fi
           ./packaging/build-appimage.sh "$VERSION"
 
       - name: Upload build artifact
