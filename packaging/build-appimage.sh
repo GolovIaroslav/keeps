@@ -79,6 +79,11 @@ bundle_system_libraries() {
         [ -n "$path" ] || continue
         case "$soname" in
             /*) continue ;;
+            # PySide6 wheels bundle their own Qt ABI. Mixing system Qt
+            # (e.g. Arch 6.12) with wheel Qt (e.g. 6.11) breaks GUI imports.
+            libQt6*.so*|libQt5*.so*)
+                continue
+                ;;
             libc.so.6|libdl.so.2|libm.so.6|libpthread.so.0|librt.so.1|libutil.so.1|\
             ld-linux-*.so.*|libGL.so.1|libEGL.so.1|libGLX.so.0|libGLdispatch.so.0)
                 continue
@@ -212,5 +217,12 @@ mkdir -p "$VERIFY_DIR"
         squashfs-root/AppRun --version | grep -Fx "$VERSION" >/dev/null
     PYTHONHOME=/nonexistent-python-home PYTHONPATH=/nonexistent-python-path \
         squashfs-root/AppRun status >/dev/null
+    # Importing Python packages and reporting --version does not load all Qt
+    # modules. Exercise QtWidgets from the *packed* image under the same
+    # library search path as AppRun, without opening a user database/window.
+    PYTHONHOME=/nonexistent-python-home PYTHONPATH=/nonexistent-python-path \
+        LD_LIBRARY_PATH="$VERIFY_DIR/squashfs-root/usr/lib" QT_QPA_PLATFORM=offscreen \
+        squashfs-root/usr/python312/bin/python3.12 -I -c \
+        'from PySide6.QtWidgets import QApplication; from keeps.ui.popup import PopupWindow; app=QApplication([])'
 )
 printf 'created %s\n' "$OUTPUT"
