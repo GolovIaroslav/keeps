@@ -950,6 +950,8 @@ class SettingsDialog(QDialog):
             refresh()
             if not ok:
                 status_label.setText(self.tr("Download failed: {error}").format(error=error))
+            elif self._ai_runtime is not None and self._ai_runtime.auto_index_enabled:
+                self._ai_runtime.index_missing_now()
 
         def on_download() -> None:
             state["downloading"] = True

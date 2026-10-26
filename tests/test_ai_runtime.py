@@ -458,7 +458,7 @@ def test_ocr_skips_embedding_for_blank_recognized_text(qapp, store, settings):
 # -- backlog sweeps (one-time pass when a toggle is first enabled) ----------
 
 
-def test_selecting_semantic_mode_embeds_backlog_but_keyword_mode_does_not(
+def test_auto_index_backlog_starts_in_keyword_mode_and_does_not_duplicate_on_switch(
     qapp, store, settings
 ):
     runtime = _make_runtime(store, settings, rag_text=True)
@@ -468,14 +468,13 @@ def test_selecting_semantic_mode_embeds_backlog_but_keyword_mode_does_not(
     for clip_id in ids:
         runtime.on_clip_captured(clip_id, "text")
     runtime.run_text_embed_backlog_sweep()
-    _settle(qapp)
-    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
-
-    runtime.set_search_mode(SearchMode.BLENDED)
-
     assert _pump_until(
         qapp, lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == len(ids)
     )
+    first_calls = list(runtime._text_embedder.calls)
+    runtime.set_search_mode(SearchMode.BLENDED)
+    _settle(qapp)
+    assert runtime._text_embedder.calls == first_calls
 
 
 def test_ocr_created_in_keyword_mode_is_embedded_after_semantic_activation(
@@ -499,7 +498,7 @@ def test_ocr_created_in_keyword_mode_is_embedded_after_semantic_activation(
     assert fake_embedder.calls == ["searchable screenshot"]
 
 
-def test_returning_to_keyword_cancels_queued_semantic_backlog(qapp, store, settings):
+def test_returning_to_keyword_does_not_cancel_auto_index_backlog(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True)
     blocker = BlockingEmbedder()
     runtime._text_embedder = blocker
@@ -511,9 +510,10 @@ def test_returning_to_keyword_cancels_queued_semantic_backlog(qapp, store, setti
     runtime.set_search_mode(SearchMode.KEYWORD)
     blocker.release.set()
 
-    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
-    assert blocker.calls == ["clip 0"]
-    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+    assert _pump_until(
+        qapp, lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 4
+    )
+    assert blocker.calls == [f"clip {i}" for i in range(4)]
 
 
 def test_returning_to_keyword_cancels_inflight_semantic_query(qapp, store, settings):
@@ -741,7 +741,7 @@ def test_ocr_finishing_after_semantic_activation_gets_embedded(qapp, store, sett
     assert embedder.calls == ["late OCR text"]
 
 
-def test_ocr_finishing_after_return_to_keyword_is_not_embedded(qapp, store, settings):
+def test_ocr_finishing_after_return_to_keyword_is_still_embedded(qapp, store, settings):
     runtime = _make_runtime(
         store, settings, rag_text=True, ocr=True, ocr_timing="immediate"
     )
@@ -758,9 +758,8 @@ def test_ocr_finishing_after_return_to_keyword_is_not_embedded(qapp, store, sett
     ocr.release.set()
 
     assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
-    _settle(qapp)
-    assert embedder.calls == []
-    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+    assert _pump_until(qapp, lambda: bool(store.get_all_embeddings(models.TEXT_EMBED.name)))
+    assert embedder.calls == ["late OCR text"]
 
 
 def test_text_embed_backlog_sweep_noop_when_rag_disabled(qapp, store, settings):
@@ -1178,3 +1177,141 @@ def test_idle_unload_never_fires_when_minutes_is_zero(qapp, store, settings):
     runtime._check_idle_unload()
 
     assert fake.unloaded is False
+
+
+def test_auto_index_embeds_text_and_images_while_keyword_search_is_active(
+    qapp, store, settings
+):
+    settings.setValue("ai/auto_index_enabled", True)
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    text = FakeEmbedder()
+    image = FakeImageEmbedder()
+    runtime._text_embedder = text
+    runtime._image_embedder = image
+
+    text_id = store.add("text", {"text/plain": b"searchable note"})
+    image_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(text_id, "text")
+    runtime.on_clip_captured(image_id, "image")
+
+    assert runtime.search_mode == SearchMode.KEYWORD
+    assert _pump_until(
+        qapp,
+        lambda: store.get_all_embeddings(models.TEXT_EMBED.name)
+        and store.get_all_embeddings(models.IMAGE_EMBED.name),
+    )
+    assert text.calls == ["searchable note"]
+    assert image.calls == ["<image>"]
+
+
+def test_paused_auto_index_skips_capture_until_manual_catchup(
+    qapp, store, settings
+):
+    settings.setValue("ai/auto_index_enabled", False)
+    runtime = _make_runtime(
+        store, settings, rag_text=True, ocr=True, image_semantic=True,
+        ocr_timing="immediate",
+    )
+    text = FakeEmbedder()
+    image = FakeImageEmbedder()
+    ocr = FakeOcrEngine("text from image")
+    runtime._text_embedder = text
+    runtime._image_embedder = image
+    runtime._ocr_engine = ocr
+
+    note = store.add("text", {"text/plain": b"note"})
+    picture = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(note, "text")
+    runtime.on_clip_captured(picture, "image")
+    runtime.set_search_mode(SearchMode.SEMANTIC)
+    _settle(qapp)
+    assert text.calls == []
+    assert image.calls == []
+    assert ocr.calls == 0
+    assert runtime.missing_index_counts() == {"text": 1, "images": 1, "ocr": 1}
+
+    assert runtime.index_missing_now() == 3
+    assert _pump_until(
+        qapp,
+        lambda: not runtime._pending_ai_tasks
+        and runtime.missing_index_counts() == {"text": 0, "images": 0, "ocr": 0},
+    )
+    assert runtime.auto_index_enabled is False
+    assert runtime.manual_index_active is False
+
+    late = store.add("text", {"text/plain": b"unindexed followup"})
+    runtime.on_clip_captured(late, "text")
+    _settle(qapp)
+    assert store.clip_needs_embedding(late, models.TEXT_EMBED.name)
+
+
+def test_enabling_auto_index_backfills_paused_clips(qapp, store, settings):
+    settings.setValue("ai/auto_index_enabled", False)
+    runtime = _make_runtime(store, settings, rag_text=True)
+    fake = FakeEmbedder()
+    runtime._text_embedder = fake
+    note = store.add("text", {"text/plain": b"old note"})
+    runtime.on_clip_captured(note, "text")
+    _settle(qapp)
+    assert store.get_all_embeddings(models.TEXT_EMBED.name) == []
+
+    runtime.set_auto_index_enabled(True)
+    assert _pump_until(qapp, lambda: bool(store.get_all_embeddings(models.TEXT_EMBED.name)))
+    assert runtime.auto_index_enabled is True
+    assert fake.calls == ["old note"]
+
+
+def test_switching_to_keywords_does_not_cancel_auto_index_backlog(
+    qapp, store, settings
+):
+    settings.setValue("ai/auto_index_enabled", True)
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    for i in range(3):
+        store.add("text", {"text/plain": f"item {i}".encode()})
+    runtime.set_search_mode(SearchMode.BLENDED)
+    runtime.index_missing_now()
+    assert blocker.started.wait(timeout=2)
+    runtime.set_search_mode(SearchMode.KEYWORD)
+    blocker.release.set()
+    assert _pump_until(
+        qapp, lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 3
+    )
+
+
+def test_pausing_auto_index_cancels_remaining_backlog(qapp, store, settings):
+    settings.setValue("ai/auto_index_enabled", True)
+    runtime = _make_runtime(store, settings, rag_text=True)
+    blocker = BlockingEmbedder()
+    runtime._text_embedder = blocker
+    for i in range(3):
+        store.add("text", {"text/plain": f"item {i}".encode()})
+    runtime.index_missing_now()
+    assert blocker.started.wait(timeout=2)
+    runtime.set_auto_index_enabled(False)
+    blocker.release.set()
+    assert _pump_until(qapp, lambda: not runtime._pending_ai_tasks)
+    assert len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 0
+    assert len(runtime._text_embed_backlog) == 0
+    assert runtime.missing_index_counts()["text"] == 3
+
+
+def test_missing_model_does_not_queue_failed_indexing_jobs(
+    qapp, store, settings, monkeypatch
+):
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    monkeypatch.setattr(models, "is_downloaded", lambda _model: False)
+    text = store.add("text", {"text/plain": b"will index after model download"})
+    image = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(text, "text")
+    runtime.on_clip_captured(image, "image")
+    assert runtime.indexable_missing_counts() == {"text": 0, "images": 0, "ocr": 0}
+    assert runtime.index_missing_now() == 0
+    _settle(qapp)
+
+    assert runtime._pending_ai_tasks == set()
+    assert not runtime._text_embed_backlog
+    assert not runtime._image_embed_backlog
+    assert runtime.missing_index_counts()["text"] == 1
+    assert runtime.missing_index_counts()["images"] == 1

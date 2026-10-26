@@ -120,3 +120,85 @@ store.close()
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_popup_auto_index_controls_are_accessible_and_report_old_pause(tmp_path):
+    script = r'''
+import time
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from keeps import config
+from keeps.ai.ranking import SearchMode
+from keeps.store import Store
+from keeps.ui.popup import PopupWindow
+
+class FakeIndexRuntime:
+    rag_text_enabled = True
+    ocr_enabled = True
+    image_semantic_enabled = True
+    search_mode = SearchMode.KEYWORD
+    manual_index_active = False
+    auto_index_enabled = False
+
+    def __init__(self):
+        self.calls = []
+
+    def missing_index_counts(self):
+        return {"text": 5, "images": 2, "ocr": 3}
+
+    def indexable_missing_counts(self):
+        return self.missing_index_counts()
+
+    def set_auto_index_enabled(self, enabled):
+        self.calls.append(("toggle", enabled))
+        self.auto_index_enabled = enabled
+
+    def index_missing_now(self):
+        self.calls.append(("manual",))
+        return 10
+
+app = QApplication([])
+settings = config.open_settings()
+settings.setValue("ai/auto_index_paused_since", int(time.time() - 4 * 86400))
+store = Store(Path("store.db"))
+runtime = FakeIndexRuntime()
+popup = PopupWindow(store, runtime)
+popup.resize(340, 480)
+popup.show()
+popup.refresh()
+app.processEvents()
+
+assert popup._auto_index_box.text() == "Auto-index"
+assert popup._auto_index_box.isChecked() is False
+assert popup._auto_index_box.isVisible()
+assert popup._index_missing_button.accessibleName() == "Index missing"
+assert popup._index_missing_button.isEnabled()
+assert "10" in popup._index_status_label.text()
+assert "Paused" in popup._index_status_label.toolTip()
+assert popup.search_edit.width() >= 75
+
+popup._index_missing_button.click()
+assert ("manual",) in runtime.calls
+popup._auto_index_box.click()
+assert ("toggle", True) in runtime.calls
+assert popup._auto_index_box.isChecked() is True
+runtime.indexable_missing_counts = lambda: {"text": 0, "images": 0, "ocr": 0}
+popup._refresh_index_status()
+assert not popup._index_missing_button.isEnabled()
+assert "Download" in popup._index_missing_button.toolTip()
+popup.close()
+store.close()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ
+        | {
+            "QT_QPA_PLATFORM": "offscreen",
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

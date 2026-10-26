@@ -142,6 +142,7 @@ def _popup_debug() -> int:
 
 def _run_daemon(show_immediately: bool) -> int:
     """The single-instance background process: capture + popup + global hotkey + tray + IPC."""
+    from PySide6.QtCore import QTimer
     from PySide6.QtNetwork import QLocalServer
     from PySide6.QtWidgets import QApplication
 
@@ -182,8 +183,11 @@ def _run_daemon(show_immediately: bool) -> int:
     thumbnail_runtime = ThumbnailRuntime(store)
     watcher.clip_added.connect(ai_runtime.on_clip_captured)
     watcher.clip_added.connect(thumbnail_runtime.on_clip_captured)
-    if ai_runtime.ocr_enabled:
-        ai_runtime.run_ocr_backlog_sweep()
+    if ai_runtime.auto_index_enabled:
+        QTimer.singleShot(
+            3000,
+            lambda: ai_runtime.index_missing_now() if ai_runtime.auto_index_enabled else None,
+        )
 
     popup = PopupWindow(store, ai_runtime)
     popup.programmatic_clipboard_set.connect(watcher.mark_self_set)

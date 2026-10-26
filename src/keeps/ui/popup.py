@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -534,6 +536,25 @@ class PopupWindow(QWidget):
         search_row.addWidget(self._content_filter_combo)
         search_row.addWidget(self._mode_combo)
 
+        self._index_controls = QWidget(self)
+        index_row = QHBoxLayout(self._index_controls)
+        index_row.setContentsMargins(0, 0, 0, 0)
+        self._auto_index_box = QCheckBox(self.tr("Auto-index"), self._index_controls)
+        self._auto_index_box.setToolTip(self.tr("Index new clips in the background"))
+        self._auto_index_box.toggled.connect(self._toggle_auto_index)
+        index_row.addWidget(self._auto_index_box)
+        self._index_missing_button = QToolButton(self._index_controls)
+        self._index_missing_button.setText(self.tr("Index missing"))
+        self._index_missing_button.setAccessibleName(self.tr("Index missing"))
+        self._index_missing_button.setToolTip(self.tr("Index clips not yet processed"))
+        self._index_missing_button.setIcon(QIcon.fromTheme("view-refresh"))
+        self._index_missing_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._index_missing_button.clicked.connect(self._index_missing_now)
+        index_row.addWidget(self._index_missing_button)
+        index_row.addStretch(1)
+        self._index_status_label = QLabel(self._index_controls)
+        index_row.addWidget(self._index_status_label)
+
         self._title_bar = _TitleBar(self)
         title_bar_layout = QHBoxLayout(self._title_bar)
         title_bar_layout.setContentsMargins(2, 0, 2, 0)
@@ -597,8 +618,14 @@ class PopupWindow(QWidget):
         layout.setContentsMargins(*([_RESIZE_MARGIN] * 4))
         layout.addWidget(self._title_bar)
         layout.addLayout(search_row)
+        layout.addWidget(self._index_controls)
         layout.addWidget(self.tabs)
         layout.addWidget(self.list_view)
+
+        self._index_status_timer = QTimer(self)
+        self._index_status_timer.setInterval(3000)
+        self._index_status_timer.timeout.connect(self._refresh_index_status)
+        self._refresh_index_status()
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -637,6 +664,7 @@ class PopupWindow(QWidget):
         self._refresh_tabs()
         self.refresh()
         self._select_row(0)
+        self._index_status_timer.start()
         self._drop_stale_surface()
         self.show()
         self.raise_()
@@ -662,6 +690,7 @@ class PopupWindow(QWidget):
         self._update_sort_button()
         self._refresh_local_hotkeys()
         self.refresh()
+        self._refresh_index_status()
 
     def _hotkey_error_text(self, error: str) -> str:
         messages = {
@@ -725,6 +754,7 @@ class PopupWindow(QWidget):
             self.destroy()
 
     def hideEvent(self, event) -> None:
+        self._index_status_timer.stop()
         self._remember_search_query(self.search_edit.text())
         self._settings.setValue("popup/size", self.size())
         super().hideEvent(event)
@@ -772,6 +802,7 @@ class PopupWindow(QWidget):
         self._prune_deleted_global_hotkeys()
         self.model.set_query(self.search_edit.text())
         self._update_count_label()
+        self._refresh_index_status()
         self._prune_thumbnail_cache()
         self._refresh_local_hotkeys()
 
@@ -1683,6 +1714,68 @@ class PopupWindow(QWidget):
             self._update_count_label()
             self._select_row(0)
             self.search_edit.setFocus()
+
+    def _toggle_auto_index(self, enabled: bool) -> None:
+        if self._ai_runtime is not None:
+            self._ai_runtime.set_auto_index_enabled(enabled)
+        self._refresh_index_status()
+        self.search_edit.setFocus()
+
+    def _index_missing_now(self) -> None:
+        if self._ai_runtime is not None:
+            self._ai_runtime.index_missing_now()
+        self._refresh_index_status()
+        self.search_edit.setFocus()
+
+    def _refresh_index_status(self) -> None:
+        runtime = self._ai_runtime
+        available = runtime is not None and (
+            runtime.rag_text_enabled
+            or runtime.image_semantic_enabled
+            or runtime.ocr_enabled
+        )
+        self._index_controls.setVisible(available)
+        if not available:
+            return
+        self._auto_index_box.blockSignals(True)
+        self._auto_index_box.setChecked(runtime.auto_index_enabled)
+        self._auto_index_box.blockSignals(False)
+        counts = runtime.missing_index_counts()
+        total = sum(counts.values())
+        ready_count = sum(runtime.indexable_missing_counts().values())
+        self._index_missing_button.setEnabled(
+            ready_count > 0 and not runtime.manual_index_active
+        )
+        self._index_missing_button.setToolTip(
+            self.tr("Index unprocessed clips")
+            if ready_count else self.tr("Download enabled AI models in Settings first")
+        )
+        tooltip = self.tr("Text: {text}, images: {images}, OCR: {ocr}").format(
+            **counts
+        )
+        if not runtime.auto_index_enabled:
+            paused_at = int(config.get(self._settings, "ai/auto_index_paused_since"))
+            elapsed_days = (
+                max(0, int(time.time() - paused_at) // 86400) if paused_at else 0
+            )
+            if elapsed_days >= 3 and total:
+                self._index_status_label.setText(
+                    self.tr("Paused {days}d · {count}").format(
+                        days=elapsed_days, count=total
+                    )
+                )
+                tooltip = self.tr("Paused for {days} days. ").format(
+                    days=elapsed_days
+                ) + tooltip
+            else:
+                self._index_status_label.setText(
+                    self.tr("{count} missing").format(count=total)
+                )
+        else:
+            self._index_status_label.setText(
+                self.tr("{count} missing").format(count=total)
+            )
+        self._index_status_label.setToolTip(tooltip)
 
     def _select_sort_order(self, order: str) -> None:
         self.model.set_sort_order(order)
