@@ -110,6 +110,7 @@ class UnifiedEmbedder:
             from tokenizers import Tokenizer
 
             self._tokenizer = Tokenizer.from_file(str(self._tokenizer_path))
+            self._tokenizer.enable_truncation(max_length=384)
 
     def unload(self) -> None:
         self._text_session = None

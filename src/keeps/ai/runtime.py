@@ -18,6 +18,9 @@ from keeps.ai import models
 from keeps.ai.ranking import (
     DEFAULT_THRESHOLD,
     IMAGE_THRESHOLD,
+    UNIFIED_IMAGE_THRESHOLD,
+    UNIFIED_RELATIVE_MARGIN,
+    UNIFIED_TEXT_THRESHOLD,
     SearchMode,
     reciprocal_rank_fusion,
 )
@@ -73,13 +76,17 @@ class _EncodeQueryTask(QRunnable):
     """
 
     def __init__(
-        self, query: str, signals: _QuerySignals, encoders_and_vecs, is_current
+        self, query: str, signals: _QuerySignals, encoders_and_vecs, is_current,
+        relative_margin: float | None = None,
+        source_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._query = query
         self._signals = signals
         self._encoders_and_vecs = encoders_and_vecs
         self._is_current = is_current
+        self._relative_margin = relative_margin
+        self._source_names = source_names
 
     def run(self) -> None:
         try:
@@ -89,7 +96,10 @@ class _EncodeQueryTask(QRunnable):
 
             score_sets = []
             thresholds = []
-            for encode_query, clip_ids_and_vecs, threshold in self._encoders_and_vecs:
+            source_names = []
+            for index, (encode_query, clip_ids_and_vecs, threshold) in enumerate(
+                self._encoders_and_vecs
+            ):
                 try:
                     query_vec = encode_query(self._query)
                 except Exception:
@@ -105,10 +115,19 @@ class _EncodeQueryTask(QRunnable):
                     scores[clip_id] = float(np.dot(query_vec, vec))
                 score_sets.append(scores)
                 thresholds.append(threshold)
+                if self._source_names is not None:
+                    source_names.append(self._source_names[index])
             if self._is_current():
                 self._signals.finished.emit(
                     self._query,
-                    reciprocal_rank_fusion(score_sets, thresholds=thresholds),
+                    reciprocal_rank_fusion(
+                        score_sets,
+                        thresholds=thresholds,
+                        relative_margin=self._relative_margin,
+                        source_names=(
+                            source_names if self._source_names is not None else None
+                        ),
+                    ),
                 )
         finally:
             self._signals.done.emit()
@@ -267,6 +286,11 @@ class AiRuntime(QObject):
         super().__init__(parent)
         self._store = store
         self._settings = settings
+        self._embedding_backend = models.selected_embedding_backend(
+            str(config.get(settings, "ai/embedding_backend")),
+            models.is_downloaded(models.UNIFIED_EMBED),
+        )
+        self._unified_embedder = None
         self._text_embedder = None
         self._text_embedder_lock = threading.Lock()
         self._image_embedder = None
@@ -322,6 +346,42 @@ class AiRuntime(QObject):
         self._scheduled_timer.start()
 
     @property
+    def embedding_backend(self) -> str:
+        return self._embedding_backend
+
+    @property
+    def text_model_spec(self) -> models.ModelSpec:
+        return (
+            models.UNIFIED_EMBED
+            if self._embedding_backend == "unified"
+            else models.TEXT_EMBED
+        )
+
+    @property
+    def image_model_spec(self) -> models.ModelSpec:
+        return (
+            models.UNIFIED_EMBED
+            if self._embedding_backend == "unified"
+            else models.IMAGE_EMBED
+        )
+
+    @property
+    def text_embedding_key(self) -> str:
+        return (
+            models.UNIFIED_TEXT_KEY
+            if self._embedding_backend == "unified"
+            else models.TEXT_EMBED.name
+        )
+
+    @property
+    def image_embedding_key(self) -> str:
+        return (
+            models.UNIFIED_IMAGE_KEY
+            if self._embedding_backend == "unified"
+            else models.IMAGE_EMBED.name
+        )
+
+    @property
     def rag_text_enabled(self) -> bool:
         return bool(config.get(self._settings, "ai/rag_text_enabled"))
 
@@ -355,21 +415,39 @@ class AiRuntime(QObject):
     def missing_index_counts(self) -> dict[str, int]:
         return {
             "text": (
-                len(self._store.clips_missing_embedding(models.TEXT_EMBED.name))
+                len(self._store.clips_missing_embedding(self.text_embedding_key))
                 if self.rag_text_enabled else 0
             ),
             "images": (
-                len(self._store.clips_missing_image_embedding(models.IMAGE_EMBED.name))
+                len(self._store.clips_missing_image_embedding(self.image_embedding_key))
                 if self.image_semantic_enabled else 0
             ),
             "ocr": len(self._store.clips_missing_ocr()) if self.ocr_enabled else 0,
         }
 
+    @property
+    def text_model_available(self) -> bool:
+        instance = (
+            self._unified_embedder
+            if self._embedding_backend == "unified"
+            else self._text_embedder
+        )
+        return instance is not None or models.is_downloaded(self.text_model_spec)
+
+    @property
+    def image_model_available(self) -> bool:
+        instance = (
+            self._unified_embedder
+            if self._embedding_backend == "unified"
+            else self._image_embedder
+        )
+        return instance is not None or models.is_downloaded(self.image_model_spec)
+
     def indexable_missing_counts(self) -> dict[str, int]:
         counts = self.missing_index_counts()
-        if self._text_embedder is None and not models.is_downloaded(models.TEXT_EMBED):
+        if not self.text_model_available:
             counts["text"] = 0
-        if self._image_embedder is None and not models.is_downloaded(models.IMAGE_EMBED):
+        if not self.image_model_available:
             counts["images"] = 0
         if self._ocr_engine is None:
             languages = config.parse_ocr_languages(
@@ -494,6 +572,9 @@ class AiRuntime(QObject):
         if idle < minutes * 60:
             return
         unloaded = False
+        if self._unified_embedder is not None and self._unified_embedder.is_loaded:
+            self._unified_embedder.unload()
+            unloaded = True
         if self._text_embedder is not None and self._text_embedder.is_loaded:
             self._text_embedder.unload()
             unloaded = True
@@ -508,7 +589,31 @@ class AiRuntime(QObject):
 
     # -- text embedder lifecycle (Model management) -------------------------
 
+    def _get_unified_embedder(self):
+        with self._text_embedder_lock:
+            if self._unified_embedder is None:
+                from keeps.ai.unified_embed import UnifiedEmbedder
+
+                files = models.UNIFIED_EMBED.files
+                paths = [models.file_dest(models.UNIFIED_EMBED, f) for f in files]
+                self._unified_embedder = UnifiedEmbedder(paths[0], paths[2], paths[4])
+            return self._unified_embedder
+
+    def unified_embed_status(self) -> models.ModelStatus:
+        loaded = self._unified_embedder is not None and self._unified_embedder.is_loaded
+        return models.status(models.UNIFIED_EMBED, loaded=loaded)
+
+    def load_unified_embedder(self) -> None:
+        self._get_unified_embedder().load()
+        self._touch_activity()
+
+    def unload_unified_embedder(self) -> None:
+        if self._unified_embedder is not None:
+            self._unified_embedder.unload()
+
     def _get_text_embedder(self):
+        if self._embedding_backend == "unified":
+            return self._get_unified_embedder()
         # Guards construction only: direct model-management calls can still
         # race with the serialized AI pool while lazily creating the embedder.
         with self._text_embedder_lock:
@@ -521,6 +626,8 @@ class AiRuntime(QObject):
             return self._text_embedder
 
     def text_embed_status(self) -> models.ModelStatus:
+        if self._embedding_backend == "unified":
+            return self.unified_embed_status()
         loaded = self._text_embedder is not None and self._text_embedder.is_loaded
         return models.status(models.TEXT_EMBED, loaded=loaded)
 
@@ -529,10 +636,14 @@ class AiRuntime(QObject):
         self._touch_activity()
 
     def unload_text_embedder(self) -> None:
-        if self._text_embedder is not None:
+        if self._embedding_backend == "unified":
+            self.unload_unified_embedder()
+        elif self._text_embedder is not None:
             self._text_embedder.unload()
 
     def _get_image_embedder(self):
+        if self._embedding_backend == "unified":
+            return self._get_unified_embedder()
         if self._image_embedder is None:
             from keeps.ai.image_embed import ImageEmbedder
 
@@ -545,6 +656,8 @@ class AiRuntime(QObject):
         return self._image_embedder
 
     def image_embed_status(self) -> models.ModelStatus:
+        if self._embedding_backend == "unified":
+            return self.unified_embed_status()
         loaded = self._image_embedder is not None and self._image_embedder.is_loaded
         return models.status(models.IMAGE_EMBED, loaded=loaded)
 
@@ -553,7 +666,9 @@ class AiRuntime(QObject):
         self._touch_activity()
 
     def unload_image_embedder(self) -> None:
-        if self._image_embedder is not None:
+        if self._embedding_backend == "unified":
+            self.unload_unified_embedder()
+        elif self._image_embedder is not None:
             self._image_embedder.unload()
 
     # -- search ---------------------------------------------------------------
@@ -583,24 +698,39 @@ class AiRuntime(QObject):
 
     def _start_query(self, query: str, on_done, query_generation: int) -> None:
         encoders_and_vecs = []
-        if self.rag_text_enabled and (
-            self._text_embedder is not None or models.is_downloaded(models.TEXT_EMBED)
-        ):
+        source_names = []
+        if self.rag_text_enabled and self.text_model_available:
+            source_names.append("text")
             encoders_and_vecs.append(
                 (
-                    self._get_text_embedder().encode,
-                    self._store.get_all_embeddings(models.TEXT_EMBED.name),
-                    DEFAULT_THRESHOLD,
+                    (
+                        self._get_text_embedder().encode_query
+                        if self._embedding_backend == "unified"
+                        else self._get_text_embedder().encode
+                    ),
+                    self._store.get_all_embeddings(self.text_embedding_key),
+                    (
+                        UNIFIED_TEXT_THRESHOLD
+                        if self._embedding_backend == "unified"
+                        else DEFAULT_THRESHOLD
+                    ),
                 )
             )
-        if self.image_semantic_enabled and (
-            self._image_embedder is not None or models.is_downloaded(models.IMAGE_EMBED)
-        ):
+        if self.image_semantic_enabled and self.image_model_available:
+            source_names.append("image")
             encoders_and_vecs.append(
                 (
-                    self._get_image_embedder().encode_text,
-                    self._store.get_all_embeddings(models.IMAGE_EMBED.name),
-                    IMAGE_THRESHOLD,
+                    (
+                        self._get_image_embedder().encode_query
+                        if self._embedding_backend == "unified"
+                        else self._get_image_embedder().encode_text
+                    ),
+                    self._store.get_all_embeddings(self.image_embedding_key),
+                    (
+                        UNIFIED_IMAGE_THRESHOLD
+                        if self._embedding_backend == "unified"
+                        else IMAGE_THRESHOLD
+                    ),
                 )
             )
         if not encoders_and_vecs:
@@ -622,6 +752,12 @@ class AiRuntime(QObject):
                     and self._query_generation == query_generation
                     and self._search_mode != SearchMode.KEYWORD
                 ),
+                relative_margin=(
+                    UNIFIED_RELATIVE_MARGIN
+                    if self._embedding_backend == "unified"
+                    else None
+                ),
+                source_names=source_names,
             )
         )
         self._touch_activity()
@@ -645,7 +781,12 @@ class AiRuntime(QObject):
         callers must persist the result back on the main thread). Used by
         the OCR pipeline to embed newly-recognized text.
         """
-        vec = self._get_text_embedder().encode(text)
+        encoder = self._get_text_embedder()
+        vec = (
+            encoder.encode_text(text)
+            if self._embedding_backend == "unified"
+            else encoder.encode(text)
+        )
         self._touch_activity()
         return vec.astype("float32").tobytes()
 
@@ -750,18 +891,18 @@ class AiRuntime(QObject):
             backlog.append(clip_id)
 
     def _enqueue_text_embed(self, clip_id: int, *, front: bool = False) -> None:
-        if self._text_embedder is None and not models.is_downloaded(models.TEXT_EMBED):
+        if not self.text_model_available:
             return
         task_key = ("text", clip_id)
         if task_key in self._pending_ai_tasks or not self._store.clip_needs_embedding(
-            clip_id, models.TEXT_EMBED.name
+            clip_id, self.text_embedding_key
         ):
             return
         self._queue_id(self._text_embed_backlog, clip_id, front=front)
         self._drain_text_embed_backlog()
 
     def _process_clip_text_embed(self, clip_id: int) -> None:
-        if not self._store.clip_needs_embedding(clip_id, models.TEXT_EMBED.name):
+        if not self._store.clip_needs_embedding(clip_id, self.text_embedding_key):
             return
         text = self._store.embedding_text(clip_id)
         if text is None:
@@ -791,7 +932,7 @@ class AiRuntime(QObject):
         self._pending_ai_tasks.discard(("text", clip_id))
         source_is_current = self._store.content_hash(clip_id) == source_hash
         if vec_bytes and source_is_current:
-            self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+            self._store.set_embedding(clip_id, self.text_embedding_key, vec_bytes)
             self._completed_semantic_tasks["text"] += 1
             if (
                 self._completed_semantic_tasks["text"] % SEMANTIC_REFRESH_BATCH == 0
@@ -822,7 +963,7 @@ class AiRuntime(QObject):
                 return
 
     def _process_clip_image_embed(self, clip_id: int) -> None:
-        if not self._store.clip_needs_image_embedding(clip_id, models.IMAGE_EMBED.name):
+        if not self._store.clip_needs_image_embedding(clip_id, self.image_embedding_key):
             return
         image_bytes = self._store.get_data(clip_id).get("image/png")
         if image_bytes is None:
@@ -845,12 +986,12 @@ class AiRuntime(QObject):
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
 
     def _enqueue_image_embed(self, clip_id: int, *, front: bool = False) -> None:
-        if self._image_embedder is None and not models.is_downloaded(models.IMAGE_EMBED):
+        if not self.image_model_available:
             return
         if (
             ("image", clip_id) in self._pending_ai_tasks
             or not self._store.clip_needs_image_embedding(
-                clip_id, models.IMAGE_EMBED.name
+                clip_id, self.image_embedding_key
             )
         ):
             return
@@ -863,7 +1004,7 @@ class AiRuntime(QObject):
         self._pending_ai_tasks.discard(("image", clip_id))
         source_is_current = self._store.content_hash(clip_id) == source_hash
         if vec_bytes and source_is_current:
-            self._store.set_embedding(clip_id, models.IMAGE_EMBED.name, vec_bytes)
+            self._store.set_embedding(clip_id, self.image_embedding_key, vec_bytes)
             self._completed_semantic_tasks["image"] += 1
             if (
                 self._completed_semantic_tasks["image"] % SEMANTIC_REFRESH_BATCH == 0
@@ -888,14 +1029,14 @@ class AiRuntime(QObject):
         """Index text/html and OCR clips missing an embedding, when requested."""
         if not self._index_work_enabled or not self.rag_text_enabled:
             return
-        if self._text_embedder is None and not models.is_downloaded(models.TEXT_EMBED):
+        if not self.text_model_available:
             return
         pending_ids = {
             clip_id for kind, clip_id in self._pending_ai_tasks if kind == "text"
         }
         self._text_embed_backlog = deque(
             clip_id
-            for clip_id in self._store.clips_missing_embedding(models.TEXT_EMBED.name)
+            for clip_id in self._store.clips_missing_embedding(self.text_embedding_key)
             if clip_id not in pending_ids
         )
         self._completed_semantic_tasks["text"] = 0
@@ -904,14 +1045,14 @@ class AiRuntime(QObject):
     def run_image_embed_backlog_sweep(self) -> None:
         if not self._index_work_enabled or not self.image_semantic_enabled:
             return
-        if self._image_embedder is None and not models.is_downloaded(models.IMAGE_EMBED):
+        if not self.image_model_available:
             return
         pending_ids = {
             clip_id for kind, clip_id in self._pending_ai_tasks if kind == "image"
         }
         self._image_embed_backlog = deque(
             clip_id
-            for clip_id in self._store.clips_missing_image_embedding(models.IMAGE_EMBED.name)
+            for clip_id in self._store.clips_missing_image_embedding(self.image_embedding_key)
             if clip_id not in pending_ids
         )
         self._completed_semantic_tasks["image"] = 0
@@ -1024,7 +1165,7 @@ class AiRuntime(QObject):
         ):
             self.ocr_index_changed.emit()
         if vec_bytes is not None:
-            self._store.set_embedding(clip_id, models.TEXT_EMBED.name, vec_bytes)
+            self._store.set_embedding(clip_id, self.text_embedding_key, vec_bytes)
         elif self._index_work_enabled and self.rag_text_enabled and text.strip():
             self._enqueue_text_embed(clip_id, front=True)
         self._drain_ocr_backlog()

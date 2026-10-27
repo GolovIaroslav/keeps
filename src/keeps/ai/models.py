@@ -192,6 +192,15 @@ UNIFIED_TEXT_KEY = "embeddinggemma2-q4:text"
 UNIFIED_IMAGE_KEY = "embeddinggemma2-q4:image"
 
 
+def selected_embedding_backend(requested: str, unified_downloaded: bool) -> str:
+    """Resolve once at daemon startup; a settings change needs a restart."""
+    if requested == "legacy":
+        return "legacy"
+    if requested == "unified":
+        return "unified"
+    return "unified" if unified_downloaded else "legacy"
+
+
 OCR_DET = ModelSpec(
     name="ocr-det",
     label="OCR text detector (shared by all languages)",

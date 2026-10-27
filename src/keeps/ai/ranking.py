@@ -13,15 +13,26 @@ from keeps.store import Clip
 
 DEFAULT_THRESHOLD = 0.35
 IMAGE_THRESHOLD = 0.06
+UNIFIED_TEXT_THRESHOLD = 0.65
+UNIFIED_IMAGE_THRESHOLD = 0.62
+UNIFIED_RELATIVE_MARGIN = 0.045
 DEFAULT_TOP_N = 20
 RRF_K = 60
 KEYWORD_RRF_WEIGHT = 1.2
+
+
+class SemanticScores(dict[int, float]):
+    def __init__(self, scores: dict[int, float], origins: dict[int, frozenset[str]]):
+        super().__init__(scores)
+        self.origins = origins
 
 
 def reciprocal_rank_fusion(
     score_sets: list[dict[int, float]],
     top_n: int | None = None,
     thresholds: list[float] | None = None,
+    relative_margin: float | None = None,
+    source_names: list[str] | None = None,
 ) -> dict[int, float]:
     """Fuse independent embedding spaces by rank, never by raw cosine value.
 
@@ -38,9 +49,14 @@ def reciprocal_rank_fusion(
         thresholds = [DEFAULT_THRESHOLD] * len(score_sets)
     if len(thresholds) != len(score_sets):
         raise ValueError("one semantic threshold is required per score set")
+    if source_names is not None and len(source_names) != len(score_sets):
+        raise ValueError("one source label per score set is required")
 
     fused: dict[int, float] = {}
-    for scores, threshold in zip(score_sets, thresholds):
+    origins: dict[int, set[str]] = {}
+    for index, (scores, threshold) in enumerate(zip(score_sets, thresholds)):
+        if relative_margin is not None and scores:
+            threshold = max(threshold, max(scores.values()) - relative_margin)
         ranked = sorted(
             (clip_id for clip_id, score in scores.items() if score >= threshold),
             key=lambda clip_id: (-scores[clip_id], clip_id),
@@ -49,8 +65,13 @@ def reciprocal_rank_fusion(
             ranked = ranked[:top_n]
         for rank, clip_id in enumerate(ranked, start=1):
             fused[clip_id] = fused.get(clip_id, 0.0) + 1.0 / (RRF_K + rank)
+            if source_names is not None:
+                origins.setdefault(clip_id, set()).add(source_names[index])
     scale = RRF_K + 1
-    return {clip_id: score * scale for clip_id, score in fused.items()}
+    results = {clip_id: score * scale for clip_id, score in fused.items()}
+    if source_names is None:
+        return results
+    return SemanticScores(results, {k: frozenset(v) for k, v in origins.items()})
 
 
 class SearchMode(Enum):

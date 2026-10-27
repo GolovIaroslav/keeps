@@ -49,6 +49,7 @@ DEFAULTS: dict[str, bool | int | str] = {
     "capture/store_all_formats": False,
     "ai/auto_index_enabled": True,
     "ai/auto_index_paused_since": 0,
+    "ai/embedding_backend": "auto",
     "ai/rag_text_enabled": False,
     "ai/ocr_enabled": False,
     "ai/image_semantic_enabled": False,
