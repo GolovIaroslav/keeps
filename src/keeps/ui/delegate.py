@@ -244,6 +244,6 @@ class ClipItemDelegate(QStyledItemDelegate):
             preview_option,
             preview_rect,
             display_text,
-            index.model().current_query,
+            index.model().highlight_query(clip.id),
         )
         painter.restore()

@@ -266,3 +266,46 @@ store.close()
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+def test_meaning_does_not_highlight_incidental_query_tokens(tmp_path):
+    script = r'''
+from pathlib import Path
+from types import SimpleNamespace
+from PySide6.QtWidgets import QApplication
+from keeps.ai.ranking import SearchMode
+from keeps.store import Store
+from keeps.ui.popup import ClipListModel
+
+app = QApplication([])
+store = Store(Path("store.db"))
+clip = store.add("text", {"text/plain": b"an api key lives here"})
+runtime = SimpleNamespace(
+    rag_text_enabled=True,
+    image_semantic_enabled=False,
+    ocr_enabled=False,
+    search_mode=SearchMode.SEMANTIC,
+    encode_query_async=lambda q, done: done(q, {clip: 0.91}),
+)
+model = ClipListModel(store, runtime)
+model.set_query("api key")
+assert model.rowCount() == 1
+assert model.match_reason(clip).value == "semantic"
+assert model.highlight_query(clip) == ""
+
+runtime.search_mode = SearchMode.KEYWORD
+model.set_query("api key")
+assert model.highlight_query(clip) == "api key"
+store.close()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ | {
+            "QT_QPA_PLATFORM": "offscreen",
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

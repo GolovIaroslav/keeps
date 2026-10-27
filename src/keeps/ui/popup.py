@@ -225,6 +225,16 @@ class ClipListModel(QAbstractListModel):
     def match_reason(self, clip_id: int) -> MatchReason | None:
         return self._match_reasons.get(clip_id)
 
+    def highlight_query(self, clip_id: int) -> str:
+        if (
+            self._ai_runtime is not None
+            and self._ai_runtime.search_mode == ranking.SearchMode.SEMANTIC
+        ):
+            return ""
+        if self._match_reasons.get(clip_id) == MatchReason.SEMANTIC:
+            return ""
+        return self._current_query
+
     def display_text(self, clip: Clip) -> str:
         return self._display_texts.get(clip.id, clip.alias or clip.preview)
 
