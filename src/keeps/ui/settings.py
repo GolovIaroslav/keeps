@@ -798,6 +798,39 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
+        backend_row = QFormLayout()
+        backend_combo = QComboBox()
+        backend_combo.addItem(self.tr("Auto (recommended model if downloaded)"), "auto")
+        backend_combo.addItem(self.tr("EmbeddingGemma 2 Q4"), "unified")
+        backend_combo.addItem(self.tr("Legacy (Granite + SigLIP2)"), "legacy")
+        current_backend = str(config.get(self._settings, "ai/embedding_backend"))
+        selected = backend_combo.findData(current_backend)
+        backend_combo.setCurrentIndex(max(0, selected))
+        backend_combo.currentIndexChanged.connect(
+            lambda index: self._save(
+                "ai/embedding_backend", backend_combo.itemData(index)
+            )
+        )
+        backend_row.addRow(self.tr("Embedding engine"), backend_combo)
+        layout.addLayout(backend_row)
+
+        active_backend = (
+            self._ai_runtime.embedding_backend
+            if self._ai_runtime is not None
+            else "legacy"
+        )
+        backend_hint = QLabel(
+            self.tr("Active: {engine}. Restart Keeps after changing the engine.").format(
+                engine=(
+                    self.tr("EmbeddingGemma 2 Q4")
+                    if active_backend == "unified"
+                    else self.tr("Legacy models")
+                )
+            )
+        )
+        backend_hint.setWordWrap(True)
+        layout.addWidget(backend_hint)
+
         # Three independent toggles (PLAN.md §9) -- plain substring search is
         # never gated by any of these, so there's no "AI on/off" master switch.
         toggles = QFormLayout()
@@ -853,7 +886,16 @@ class SettingsDialog(QDialog):
         if self._ai_runtime is not None:
             layout.addWidget(
                 self._build_model_section(
-                    self.tr("Text embeddings"),
+                    self.tr("EmbeddingGemma 2 (shared text and vision)"),
+                    (models.UNIFIED_EMBED,),
+                    self._ai_runtime.unified_embed_status,
+                    self._ai_runtime.load_unified_embedder,
+                    self._ai_runtime.unload_unified_embedder,
+                )
+            )
+            layout.addWidget(
+                self._build_model_section(
+                    self.tr("Legacy text embeddings"),
                     (models.TEXT_EMBED,),
                     self._ai_runtime.text_embed_status,
                     self._ai_runtime.load_text_embedder,
@@ -864,7 +906,7 @@ class SettingsDialog(QDialog):
         if self._ai_runtime is not None:
             layout.addWidget(
                 self._build_model_section(
-                    self.tr("Image-semantic search"),
+                    self.tr("Legacy image embeddings"),
                     (models.IMAGE_EMBED,),
                     self._ai_runtime.image_embed_status,
                     self._ai_runtime.load_image_embedder,
@@ -936,9 +978,7 @@ class SettingsDialog(QDialog):
             status_label.setText(self.tr("Status: {status}").format(status=status.value))
             progress.setVisible(status == models.ModelStatus.DOWNLOADING)
             download_btn.setEnabled(status == models.ModelStatus.NOT_DOWNLOADED)
-            delete_btn.setEnabled(
-                status in (models.ModelStatus.DOWNLOADED, models.ModelStatus.LOADED)
-            )
+            delete_btn.setEnabled(status == models.ModelStatus.DOWNLOADED)
             load_btn.setEnabled(status == models.ModelStatus.DOWNLOADED)
             unload_btn.setEnabled(status == models.ModelStatus.LOADED)
 
@@ -950,6 +990,12 @@ class SettingsDialog(QDialog):
             refresh()
             if not ok:
                 status_label.setText(self.tr("Download failed: {error}").format(error=error))
+            elif (
+                self._ai_runtime is not None
+                and models.UNIFIED_EMBED in specs
+                and self._ai_runtime.embedding_backend != "unified"
+            ):
+                status_label.setText(self.tr("Downloaded. Restart Keeps to activate."))
             elif self._ai_runtime is not None and self._ai_runtime.auto_index_enabled:
                 self._ai_runtime.index_missing_now()
 
