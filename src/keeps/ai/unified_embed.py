@@ -7,6 +7,7 @@ modalities. No audio encoder or PyTorch runtime is needed.
 from __future__ import annotations
 
 import math
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -86,6 +87,7 @@ class UnifiedEmbedder:
         self._text_session = None
         self._vision_session = None
         self._tokenizer = None
+        self._state_lock = threading.RLock()
 
     @property
     def is_loaded(self) -> bool:
@@ -104,24 +106,27 @@ class UnifiedEmbedder:
         )
 
     def load(self) -> None:
-        if self._text_session is None:
-            self._text_session = self._open(self._text_path)
-        if self._tokenizer is None:
-            from tokenizers import Tokenizer
+        with self._state_lock:
+            if self._text_session is None:
+                self._text_session = self._open(self._text_path)
+            if self._tokenizer is None:
+                from tokenizers import Tokenizer
 
-            self._tokenizer = Tokenizer.from_file(str(self._tokenizer_path))
-            self._tokenizer.enable_truncation(max_length=384)
+                self._tokenizer = Tokenizer.from_file(str(self._tokenizer_path))
+                self._tokenizer.enable_truncation(max_length=384)
 
     def unload(self) -> None:
-        self._text_session = None
-        self._vision_session = None
-        self._tokenizer = None
-        self.encode_query.cache_clear()
+        with self._state_lock:
+            self._text_session = None
+            self._vision_session = None
+            self._tokenizer = None
+            self.encode_query.cache_clear()
 
     def _encode(self, text: str):
-        self.load()
-        encoding = self._tokenizer.encode(text)
-        return self._inference(encoding.ids, encoding.attention_mask)
+        with self._state_lock:
+            self.load()
+            encoding = self._tokenizer.encode(text)
+            return self._inference(encoding.ids, encoding.attention_mask)
 
     def _inference(self, token_ids, attention_mask, image_features=None):
         import numpy as np
@@ -148,6 +153,10 @@ class UnifiedEmbedder:
         return self._encode(DOCUMENT_PREFIX + text)
 
     def encode_image(self, content: bytes):
+        with self._state_lock:
+            return self._encode_image_locked(content)
+
+    def _encode_image_locked(self, content: bytes):
         import numpy as np
 
         self.load()

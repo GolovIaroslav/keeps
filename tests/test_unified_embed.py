@@ -54,3 +54,40 @@ def test_unified_artifacts_are_shared_and_not_duplicated():
     assert all(p.parent == paths[0].parent for p in paths)
     assert models.UNIFIED_TEXT_KEY != models.UNIFIED_IMAGE_KEY
     assert 300_000_000 < spec.total_size_bytes < 320_000_000
+
+
+def test_unload_waits_until_query_finishes(tmp_path):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    entered = threading.Event()
+    finish = threading.Event()
+    unloaded = threading.Event()
+
+    class SlowSession:
+        def run(self, output_names, inputs):
+            entered.set()
+            assert finish.wait(3)
+            return [np.ones((1, 768), dtype=np.float32)]
+
+    model = UnifiedEmbedder(tmp_path / "unused.onnx", tmp_path / "vision", tmp_path / "tok")
+    model._text_session = SlowSession()
+    model._tokenizer = SimpleNamespace(
+        encode=lambda _: SimpleNamespace(ids=[1, 2], attention_mask=[1, 1])
+    )
+
+    query = threading.Thread(target=lambda: model.encode_text("a test"))
+    closer = threading.Thread(target=lambda: (model.unload(), unloaded.set()))
+    query.start()
+    assert entered.wait(3)
+    closer.start()
+    time.sleep(.05)
+    assert not unloaded.is_set(), "unload must not free a running session"
+    finish.set()
+    query.join(timeout=3)
+    closer.join(timeout=3)
+    assert not query.is_alive()
+    assert not closer.is_alive()
+    assert unloaded.is_set()
+    assert not model.is_loaded
