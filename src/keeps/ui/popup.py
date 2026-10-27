@@ -188,6 +188,7 @@ class ClipListModel(QAbstractListModel):
         self._clips: list[Clip] = []
         self._current_query = ""
         self._semantic_scores: dict[int, float] = {}
+        self._semantic_origins: dict[int, frozenset[str]] = {}
         self._match_reasons: dict[int, MatchReason] = {}
         self._display_texts: dict[int, str] = {}
         # Ф9.3: ids of every clip *pasted* (not merely copied) this popup
@@ -225,6 +226,22 @@ class ClipListModel(QAbstractListModel):
     def match_reason(self, clip_id: int) -> MatchReason | None:
         return self._match_reasons.get(clip_id)
 
+    def match_source_label(self, clip_id: int) -> str | None:
+        reason = self._match_reasons.get(clip_id)
+        if reason is None:
+            return None
+        if reason != MatchReason.SEMANTIC:
+            return reason.value
+        channels = self._semantic_origins.get(clip_id, frozenset())
+        if "image" in channels and "text" in channels:
+            return "visual+OCR"
+        if "image" in channels:
+            return "visual"
+        if "text" in channels:
+            clip = next((c for c in self._clips if c.id == clip_id), None)
+            return "OCR meaning" if clip is not None and clip.kind == "image" else "meaning"
+        return "meaning"
+
     def highlight_query(self, clip_id: int) -> str:
         if (
             self._ai_runtime is not None
@@ -241,6 +258,7 @@ class ClipListModel(QAbstractListModel):
     def set_query(self, query: str) -> None:
         self._current_query = query
         self._semantic_scores = {}
+        self._semantic_origins = {}
         self._rebuild()
         self.refresh_semantic_scores()
 
@@ -295,6 +313,7 @@ class ClipListModel(QAbstractListModel):
         if query != self._current_query:
             return  # a newer keystroke already superseded this search
         self._semantic_scores = scores
+        self._semantic_origins = getattr(scores, "origins", {})
         self._rebuild()
 
     def _rebuild(self) -> None:
@@ -389,8 +408,19 @@ class ClipListModel(QAbstractListModel):
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
-        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
-            return self.display_text(self._clips[index.row()])
+        clip = self._clips[index.row()]
+        if role == Qt.ItemDataRole.ToolTipRole:
+            channels = self._semantic_origins.get(clip.id, frozenset())
+            if channels:
+                details = []
+                if "image" in channels:
+                    details.append("visual similarity")
+                if "text" in channels:
+                    details.append("OCR text meaning" if clip.kind == "image" else "text meaning")
+                return "Matched by " + " and ".join(details) + "\n" + self.display_text(clip)
+            return self.display_text(clip)
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self.display_text(clip)
         return None
 
 

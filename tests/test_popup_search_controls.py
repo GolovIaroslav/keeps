@@ -309,3 +309,56 @@ store.close()
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+def test_semantic_provenance_shows_visual_and_ocr_source(tmp_path):
+    script = r'''
+from pathlib import Path
+from types import SimpleNamespace
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from keeps.ai.ranking import SearchMode, SemanticScores
+from keeps.store import Store
+from keeps.ui.popup import ClipListModel
+
+app = QApplication([])
+store = Store(Path("store.db"), max_items=20)
+text = store.add("text", {"text/plain": b"pet animal"})
+image = store.add("image", {"image/png": b"test image"})
+store.set_ocr_text(image, "cute kitten")
+found = SemanticScores(
+    {text: .98, image: .91},
+    {text: frozenset({"text"}), image: frozenset({"image", "text"})},
+)
+runtime = SimpleNamespace(
+    rag_text_enabled=True,
+    image_semantic_enabled=True,
+    ocr_enabled=True,
+    search_mode=SearchMode.SEMANTIC,
+    encode_query_async=lambda query, done: done(query, found),
+)
+model = ClipListModel(store, runtime)
+model.set_query("pet animal")
+assert model.rowCount() == 2
+assert model.match_source_label(text) == "meaning"
+assert model.match_source_label(image) == "visual+OCR"
+assert model.highlight_query(text) == ""
+assert model.highlight_query(image) == ""
+descriptions = [
+    model.data(model.index(row, 0), Qt.ItemDataRole.ToolTipRole)
+    for row in range(model.rowCount())
+]
+assert any("visual similarity and OCR text meaning" in text for text in descriptions)
+store.close()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ | {
+            "QT_QPA_PLATFORM": "offscreen",
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

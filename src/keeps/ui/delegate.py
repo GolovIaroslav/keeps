@@ -220,9 +220,9 @@ class ClipItemDelegate(QStyledItemDelegate):
 
         age = relative_time(clip.last_used_at, int(time.time() * 1000))
         meta_parts = [KIND_LABELS.get(clip.kind, clip.kind.upper())]
-        match_reason = index.model().match_reason(clip.id)
-        if match_reason:
-            meta_parts.append(f"[{match_reason.value}]")
+        match_source = index.model().match_source_label(clip.id)
+        if match_source:
+            meta_parts.append(f"[{match_source}]")
         meta_parts.append(age)
         meta = " · ".join(meta_parts)
         painter.drawText(
