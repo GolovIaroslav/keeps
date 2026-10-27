@@ -974,12 +974,21 @@ class SettingsDialog(QDialog):
 
         def refresh() -> None:
             status = models.ModelStatus.DOWNLOADING if state["downloading"] else status_fn()
+            active = self._ai_runtime is None or (
+                (models.UNIFIED_EMBED in specs)
+                == (self._ai_runtime.embedding_backend == "unified")
+            )
             path_label.setText(f"{dirs} ({models.human_size(total_size)})")
-            status_label.setText(self.tr("Status: {status}").format(status=status.value))
+            status_label.setText(
+                self.tr("Status: {status}").format(status=status.value)
+                + ("" if active else self.tr(" (inactive; change engine and restart)"))
+            )
             progress.setVisible(status == models.ModelStatus.DOWNLOADING)
             download_btn.setEnabled(status == models.ModelStatus.NOT_DOWNLOADED)
             delete_btn.setEnabled(status == models.ModelStatus.DOWNLOADED)
-            load_btn.setEnabled(status == models.ModelStatus.DOWNLOADED)
+            # Loading inactive and active backends together could exceed the
+            # memory budget; changing the backend requires a restart.
+            load_btn.setEnabled(active and status == models.ModelStatus.DOWNLOADED)
             unload_btn.setEnabled(status == models.ModelStatus.LOADED)
 
         def on_progress(done: int, total: int) -> None:
