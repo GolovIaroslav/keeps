@@ -2,7 +2,7 @@
 
 A [Ditto](https://github.com/sabrogden/Ditto)-inspired clipboard manager for Linux. Wayland-first, KDE-first, light and fast.
 
-> **Status: v0.3.4.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, workbench, persistent copy buffers, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
+> **Status: v0.3.5.** Core clipboard history, popup, auto-paste, hotkey, tray, settings, workbench, persistent copy buffers, and opt-in AI search (OCR + semantic text search) all work day-to-day on KDE Plasma Wayland. Install from source, the AUR recipe in `packaging/aur/`, or grab the AppImage from [Releases](https://github.com/GolovIaroslav/keeps/releases).
 
 ## Why
 
@@ -54,6 +54,8 @@ uv run keeps
 The tray icon has Show / New clip / Pause capture / Settings / Quit. Right-click selected clips to compare two text clips or export them; a single clip is exported in its real format (for example an image as PNG), while `Export as Keeps archive...` creates a portable `.keeps.json` backup. Use the popup title bar to create or import clips. Settings (including the scrollable `Paste` tab, popup keymap, per-clip shortcuts, and persistent copy buffers) live at `~/.config/keeps/keeps.ini`. The default interface language is English; `Settings → General → Language` also offers Russian, Spanish, German, French, Brazilian Portuguese, Simplified Chinese, and Japanese. Restart Keeps after changing it.
 
 AI search has three modes: **Keywords** (literal matches, including existing OCR text), **Meaning** (semantic similarities), and **Combined** (weighted rank fusion across keyword and semantic results). The type filter is independent of the mode. Keyword sorting changes only literal results; Meaning always sorts by similarity.
+
+Keeps supports a switchable AI embedding engine in **Settings → AI → Embedding engine**. **Auto** uses the compact EmbeddingGemma 2 Q4 text+vision model if its 302 MiB model files are downloaded; otherwise it uses the original Granite 97M + SigLIP2 models. Selecting **Legacy** preserves the previous ranking behavior. Switching engines takes effect after restarting Keeps. The SQLite indices remain separate and are not deleted or mixed. When upgrading to the new engine, existing clips must be indexed again; this can take a long time, especially for images, but existing Keywords and OCR search remain available while it runs. Use **Auto-index** to pause the background work when needed. Results from Meaning identify whether a match came from text/OCR, image pixels, or both.
 
 The popup has an **Auto-index** checkbox and an **Index missing** button with a pending counter. Auto-index updates OCR and embeddings in the background even when Keywords is selected. Turning it off pauses new work; previously indexed items remain searchable. `Index missing` performs a one-off catch-up without permanently enabling background indexing. A warning appears after three days of paused indexing with work outstanding. Enabled AI models must already be downloaded in Settings; turning off an individual AI capability also stops its indexing. Model downloads are user-initiated.
 
