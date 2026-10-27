@@ -13,9 +13,12 @@ from keeps.store import Clip
 
 DEFAULT_THRESHOLD = 0.35
 IMAGE_THRESHOLD = 0.06
-UNIFIED_TEXT_THRESHOLD = 0.65
-UNIFIED_IMAGE_THRESHOLD = 0.62
-UNIFIED_RELATIVE_MARGIN = 0.045
+# Calibrated on 110 random existing text entries, 28 existing images
+# (aggregate scores only), and labeled public positive/negative examples.
+# Unlike legacy cosines, unified-model scores sit roughly between .5 and .75.
+UNIFIED_TEXT_THRESHOLD = 0.68
+UNIFIED_IMAGE_THRESHOLD = 0.67
+UNIFIED_RELATIVE_MARGIN = 0.03
 DEFAULT_TOP_N = 20
 RRF_K = 60
 KEYWORD_RRF_WEIGHT = 1.2

@@ -34,6 +34,7 @@ SCHEDULED_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facing
 AI_TASK_MAX_THREADS = 1  # bound OCR/RAG working memory; model inference is CPU-heavy
 SEMANTIC_REFRESH_BATCH = 8
+UNIFIED_STARTUP_INDEX_DELAY_MS = 3000
 logger = logging.getLogger(__name__)
 
 
@@ -344,6 +345,16 @@ class AiRuntime(QObject):
         self._scheduled_timer.setInterval(SCHEDULED_SWEEP_INTERVAL_MS)
         self._scheduled_timer.timeout.connect(self._on_scheduled_tick)
         self._scheduled_timer.start()
+
+        if self._embedding_backend == "unified" and self.auto_index_enabled:
+            QTimer.singleShot(
+                UNIFIED_STARTUP_INDEX_DELAY_MS, self._start_unified_auto_index
+            )
+
+    def _start_unified_auto_index(self) -> None:
+        # The user may pause auto-indexing during the startup delay.
+        if self._embedding_backend == "unified" and self.auto_index_enabled:
+            self.index_missing_now()
 
     @property
     def embedding_backend(self) -> str:

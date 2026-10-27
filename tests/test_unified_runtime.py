@@ -118,3 +118,57 @@ def test_unified_rank_gate_filters_relative_noise():
         3: pytest.approx(61 / 63),
         4: pytest.approx(61 / 64),
     }
+
+
+def test_calibrated_gate_suppresses_unrelated_visual_matches():
+    from keeps.ai.ranking import (
+        UNIFIED_IMAGE_THRESHOLD,
+        UNIFIED_RELATIVE_MARGIN,
+        UNIFIED_TEXT_THRESHOLD,
+    )
+
+    assert UNIFIED_IMAGE_THRESHOLD > .65
+    assert UNIFIED_TEXT_THRESHOLD > .65
+    # Real public image cat/coffee positive examples typically exceed .7;
+    # unrelated content often does not reach .67.
+    scores = {1: .754, 2: .704, 3: .657, 4: .611}
+    admitted = reciprocal_rank_fusion(
+        [scores],
+        thresholds=[UNIFIED_IMAGE_THRESHOLD],
+        relative_margin=UNIFIED_RELATIVE_MARGIN,
+    )
+    assert set(admitted) == {1}
+
+@pytest.mark.parametrize("pause_before_timer", [False, True])
+def test_unified_startup_backfill_obeys_auto_index_pause(
+    tmp_path, monkeypatch, pause_before_timer
+):
+    from keeps.ai import runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "UNIFIED_STARTUP_INDEX_DELAY_MS", 20)
+    app = QCoreApplication.instance() or QCoreApplication([])
+    store = Store(tmp_path / "startup.db", max_items=20)
+    clip_id = store.add("text", {"text/plain": b"searchable document"})
+    settings = QSettings(str(tmp_path / "startup.ini"), QSettings.Format.IniFormat)
+    settings.setValue("ai/embedding_backend", "unified")
+    settings.setValue("ai/auto_index_enabled", True)
+    settings.setValue("ai/rag_text_enabled", True)
+    settings.setValue("ai/image_semantic_enabled", False)
+    settings.setValue("ai/ocr_enabled", False)
+    runtime = AiRuntime(store, settings)
+    fake = FakeUnifiedEncoder()
+    runtime._unified_embedder = fake
+    if pause_before_timer:
+        runtime.set_auto_index_enabled(False)
+        end = time.monotonic() + .25
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(.01)
+        assert not store.get_all_embeddings(models.UNIFIED_TEXT_KEY)
+    else:
+        assert _until(app, lambda: bool(store.get_all_embeddings(models.UNIFIED_TEXT_KEY)))
+        assert {clip_id} == {
+            clip for clip, _ in store.get_all_embeddings(models.UNIFIED_TEXT_KEY)
+        }
+    runtime._ai_pool.waitForDone(5000)
+    store.close()
