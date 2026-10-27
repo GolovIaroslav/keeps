@@ -1,9 +1,11 @@
 import argparse
+import fcntl
 import os
 import shutil
 import socket as socket_module
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from keeps import __version__, config, diagnostics
@@ -33,6 +35,27 @@ def _send_message(socket_path: str, message: bytes) -> bool:
         return True
     except OSError:
         return False
+
+
+def _start_single_instance(socket_path: str, message: bytes, *, show: bool) -> int:
+    """Prevent multiple daemons from launching independent clipboard watchers."""
+    fd = os.open(socket_path + ".lock", os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # The existing process may own the lock before its socket is ready.
+            for _ in range(20):
+                if _send_message(socket_path, message):
+                    return 0
+                time.sleep(0.05)
+            print("keeps: an instance is already starting", file=sys.stderr)
+            return 1
+        if _send_message(socket_path, message):
+            return 0
+        return _run_daemon(show_immediately=show)
+    finally:
+        os.close(fd)
 
 
 def _make_watcher(store: Store, max_item_mb: float):
@@ -183,7 +206,7 @@ def _run_daemon(show_immediately: bool) -> int:
     thumbnail_runtime = ThumbnailRuntime(store)
     watcher.clip_added.connect(ai_runtime.on_clip_captured)
     watcher.clip_added.connect(thumbnail_runtime.on_clip_captured)
-    if ai_runtime.auto_index_enabled:
+    if ai_runtime.auto_index_enabled and ai_runtime.embedding_backend != "unified":
         QTimer.singleShot(
             3000,
             lambda: ai_runtime.index_missing_now() if ai_runtime.auto_index_enabled else None,
@@ -360,16 +383,12 @@ def main() -> int:
 
     socket_path = _socket_path()
 
-    if args.command == "show":
-        if _send_message(socket_path, SHOW_MESSAGE):
-            return 0
-        return _run_daemon(show_immediately=True)
-
-    # `keeps` and `keeps toggle` both wake a live daemon; the difference only
-    # matters when none is running yet (PLAN.md §4/§11).
-    if _send_message(socket_path, TOGGLE_MESSAGE):
+    message = SHOW_MESSAGE if args.command == "show" else TOGGLE_MESSAGE
+    if _send_message(socket_path, message):
         return 0
-    return _run_daemon(show_immediately=(args.command == "toggle"))
+    return _start_single_instance(
+        socket_path, message, show=(args.command in ("show", "toggle"))
+    )
 
 
 if __name__ == "__main__":
