@@ -149,6 +149,49 @@ IMAGE_EMBED = ModelSpec(
     ),
 )
 
+# EmbeddingGemma 2's modular Q4 ONNX text/vision model. The same weights
+# generate text, OCR and visual vectors in a common 768-dimensional space.
+UNIFIED_EMBED = ModelSpec(
+    name="embeddinggemma2-q4",
+    label="EmbeddingGemma 2 Q4 (text + images, multilingual)",
+    files=(
+        ModelFile(
+            repo="onnx-community/embeddinggemma-2-ONNX",
+            path_in_repo="onnx/model_q4.onnx",
+            sha256="f9eeba97acddf139b8ee2ddf04bc30dceafa88de93fadf74d7644e0d61a477a9",
+            size_bytes=490_742,
+        ),
+        ModelFile(
+            repo="onnx-community/embeddinggemma-2-ONNX",
+            path_in_repo="onnx/model_q4.onnx_data",
+            sha256="c3975f2d1ab7a1878ae31a7d7a9b7804a827aff3800b60dfceafce21cac3df49",
+            size_bytes=174_028_800,
+        ),
+        ModelFile(
+            repo="onnx-community/embeddinggemma-2-ONNX",
+            path_in_repo="onnx/vision_encoder_q4.onnx",
+            sha256="7ea284226d4938f0ad921ab091f1d80a9ca699aa802984ef5cd5eec4f4761d96",
+            size_bytes=159_400,
+        ),
+        ModelFile(
+            repo="onnx-community/embeddinggemma-2-ONNX",
+            path_in_repo="onnx/vision_encoder_q4.onnx_data",
+            sha256="0a9d6c927334f152a33dd90874f65d6ea5228999abe6a450d3f7813677fa704c",
+            size_bytes=108_957_696,
+        ),
+        ModelFile(
+            repo="onnx-community/embeddinggemma-2-ONNX",
+            path_in_repo="tokenizer.json",
+            sha256="4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
+            size_bytes=32_170_510,
+        ),
+    ),
+)
+
+UNIFIED_TEXT_KEY = "embeddinggemma2-q4:text"
+UNIFIED_IMAGE_KEY = "embeddinggemma2-q4:image"
+
+
 OCR_DET = ModelSpec(
     name="ocr-det",
     label="OCR text detector (shared by all languages)",
