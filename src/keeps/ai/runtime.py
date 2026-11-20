@@ -35,7 +35,29 @@ OCR_TASK_PRIORITY = -1  # below default (0): background indexing, not user-facin
 AI_TASK_MAX_THREADS = 1  # bound OCR/RAG working memory; model inference is CPU-heavy
 SEMANTIC_REFRESH_BATCH = 8
 UNIFIED_STARTUP_INDEX_DELAY_MS = 3000
+BACKGROUND_PAUSE_RAM_USED = 0.85
+BACKGROUND_RESUME_RAM_USED = 0.75
 logger = logging.getLogger(__name__)
+
+
+def _system_memory_used_fraction(path: str = "/proc/meminfo") -> float | None:
+    """Estimate RAM pressure without counting reclaimable Linux page cache."""
+    try:
+        with open(path, encoding="ascii") as stream:
+            fields = {}
+            for line in stream:
+                if line.startswith(("MemTotal:", "MemAvailable:")):
+                    name, value, *_ = line.split()
+                    fields[name] = int(value)
+                    if len(fields) == 2:
+                        break
+        total = fields.get("MemTotal:", 0)
+        available = fields.get("MemAvailable:", 0)
+        if total <= 0 or "MemAvailable:" not in fields:
+            return None
+        return max(0.0, min(1.0, 1.0 - available / total))
+    except (OSError, ValueError):
+        return None
 
 
 def _release_unused_heap_memory() -> None:
@@ -297,6 +319,8 @@ class AiRuntime(QObject):
         self._image_embedder = None
         self._ocr_engine = None
         self._last_activity = 0.0
+        self._last_ocr_activity = 0.0
+        self._memory_pressure_paused = False
         self._semantic_generation = 0
         self._index_generation = 0
         self._ocr_generation = 0
@@ -327,7 +351,7 @@ class AiRuntime(QObject):
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setInterval(IDLE_CHECK_INTERVAL_MS)
-        self._idle_timer.timeout.connect(self._check_idle_unload)
+        self._idle_timer.timeout.connect(self._housekeeping_tick)
         self._idle_timer.start()
 
         # ai/ocr_timing=delayed: debounced from the *last* capture, not a
@@ -566,12 +590,35 @@ class AiRuntime(QObject):
     def ocr_delay_seconds(self) -> float:
         return float(config.get(self._settings, "ai/ocr_delay_seconds"))
 
-    def _touch_activity(self) -> None:
-        self._last_activity = time.monotonic()
+    def _touch_activity(self, *, ocr: bool = False) -> None:
+        if ocr:
+            self._last_ocr_activity = time.monotonic()
+        else:
+            self._last_activity = time.monotonic()
+
+    def _background_ai_allowed(self) -> bool:
+        used = _system_memory_used_fraction()
+        if used is None:
+            # An unreadable procfs must not permanently stall clipboard indexing.
+            self._memory_pressure_paused = False
+        elif self._memory_pressure_paused:
+            if used <= BACKGROUND_RESUME_RAM_USED:
+                self._memory_pressure_paused = False
+        elif used >= BACKGROUND_PAUSE_RAM_USED:
+            self._memory_pressure_paused = True
+        return not self._memory_pressure_paused
+
+    def _housekeeping_tick(self) -> None:
+        was_paused = self._memory_pressure_paused
+        self._check_idle_unload()
+        if was_paused and not self._memory_pressure_paused and self._index_work_enabled:
+            # Missing work is stored in SQLite, not kept as image bytes in RAM.
+            self.index_missing_now()
 
     def _check_idle_unload(self) -> None:
+        self._background_ai_allowed()
         minutes = float(config.get(self._settings, "ai/model_idle_unload_minutes"))
-        if minutes <= 0:
+        if minutes <= 0 and not self._memory_pressure_paused:
             return  # 0 = never auto-unload
         # Never drop a session while a query or background indexing task is
         # still using it. This matters with a large backlog: a single worker
@@ -579,22 +626,22 @@ class AiRuntime(QObject):
         # actively doing useful work.
         if self._ai_pool.activeThreadCount() or self._pending_ai_tasks:
             return
-        idle = time.monotonic() - self._last_activity
-        if idle < minutes * 60:
-            return
         unloaded = False
-        if self._unified_embedder is not None and self._unified_embedder.is_loaded:
-            self._unified_embedder.unload()
-            unloaded = True
-        if self._text_embedder is not None and self._text_embedder.is_loaded:
-            self._text_embedder.unload()
-            unloaded = True
-        if self._image_embedder is not None and self._image_embedder.is_loaded:
-            self._image_embedder.unload()
-            unloaded = True
-        if self._ocr_engine is not None and self._ocr_engine.is_loaded:
-            self.reset_ocr_engine()
-            unloaded = True
+        now = time.monotonic()
+        if self._memory_pressure_paused or now - self._last_activity >= minutes * 60:
+            if self._unified_embedder is not None and self._unified_embedder.is_loaded:
+                self._unified_embedder.unload()
+                unloaded = True
+            if self._text_embedder is not None and self._text_embedder.is_loaded:
+                self._text_embedder.unload()
+                unloaded = True
+            if self._image_embedder is not None and self._image_embedder.is_loaded:
+                self._image_embedder.unload()
+                unloaded = True
+        if self._memory_pressure_paused or now - self._last_ocr_activity >= minutes * 60:
+            if self._ocr_engine is not None and self._ocr_engine.is_loaded:
+                self.reset_ocr_engine()
+                unloaded = True
         if unloaded:
             _release_unused_heap_memory()
 
@@ -861,7 +908,7 @@ class AiRuntime(QObject):
         engine = self._get_ocr_engine()
         if engine is not None:
             engine.load()
-            self._touch_activity()
+            self._touch_activity(ocr=True)
 
     def unload_ocr_engine(self) -> None:
         if self._ocr_engine is not None:
@@ -933,7 +980,7 @@ class AiRuntime(QObject):
             source_hash,
             text,
             signals,
-            lambda: self._index_generation == generation,
+            lambda: self._index_generation == generation and not self._memory_pressure_paused,
         )
         self._pending_ai_tasks.add(("text", clip_id))
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
@@ -966,6 +1013,8 @@ class AiRuntime(QObject):
     def _drain_text_embed_backlog(self) -> None:
         if not self._index_work_enabled or not self.rag_text_enabled:
             return
+        if not self._background_ai_allowed():
+            return
         if any(kind == "text" for kind, _clip_id in self._pending_ai_tasks):
             return
         while self._text_embed_backlog:
@@ -993,7 +1042,7 @@ class AiRuntime(QObject):
             source_hash,
             image_bytes,
             signals,
-            lambda: self._index_generation == generation,
+            lambda: self._index_generation == generation and not self._memory_pressure_paused,
         )
         self._pending_ai_tasks.add(("image", clip_id))
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
@@ -1075,6 +1124,8 @@ class AiRuntime(QObject):
         """Queue only bounded image bytes; large histories must not balloon RSS."""
         if not self._index_work_enabled or not self.image_semantic_enabled:
             return
+        if not self._background_ai_allowed():
+            return
         if any(kind == "image" for kind, _clip_id in self._pending_ai_tasks):
             return
         while self._image_embed_backlog:
@@ -1138,7 +1189,7 @@ class AiRuntime(QObject):
         generation = self._ocr_generation
         task = _OcrTask(
             engine, clip_id, source_hash, png_bytes, signals,
-            lambda: self._ocr_generation == generation,
+            lambda: self._ocr_generation == generation and not self._memory_pressure_paused,
         )
         self._pending_ai_tasks.add(("ocr", clip_id))
         self._ai_pool.start(task, OCR_TASK_PRIORITY)
@@ -1151,7 +1202,7 @@ class AiRuntime(QObject):
         vec_bytes: bytes | None,
     ) -> None:
         self._pending_ai_tasks.discard(("ocr", clip_id))
-        self._touch_activity()
+        self._touch_activity(ocr=True)
         if text is False:
             if self._index_work_enabled and self.ocr_enabled:
                 self._enqueue_ocr(clip_id, front=True)
@@ -1187,6 +1238,8 @@ class AiRuntime(QObject):
 
     def _drain_ocr_backlog(self) -> None:
         if not self._index_work_enabled or not self.ocr_enabled:
+            return
+        if not self._background_ai_allowed():
             return
         if any(kind == "ocr" for kind, _clip_id in self._pending_ai_tasks):
             return

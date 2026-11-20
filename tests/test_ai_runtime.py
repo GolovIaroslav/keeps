@@ -28,7 +28,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QSettings
 
 from keeps.ai import models
 from keeps.ai.ranking import SearchMode
-from keeps.ai.runtime import AiRuntime, available_ocr_language_codes
+from keeps.ai.runtime import AiRuntime, _system_memory_used_fraction, available_ocr_language_codes
 from keeps.store import Store
 
 PNG_1X1 = bytes.fromhex(
@@ -181,6 +181,12 @@ def qapp():
     return QCoreApplication.instance() or QCoreApplication([])
 
 
+@pytest.fixture(autouse=True)
+def normal_memory_pressure(monkeypatch):
+    # Tests must not depend on RAM use by unrelated host applications.
+    monkeypatch.setattr("keeps.ai.runtime._system_memory_used_fraction", lambda: 0.5)
+
+
 @pytest.fixture
 def store(tmp_path):
     s = Store(tmp_path / "keeps.db", max_items=500)
@@ -230,6 +236,87 @@ def test_background_ai_pool_is_bounded_for_model_memory(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True, ocr=True)
 
     assert runtime.ai_task_max_threads == 1
+
+
+def test_memory_pressure_uses_available_ram_not_free_ram(tmp_path):
+    info = tmp_path / "meminfo"
+    info.write_text("MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 400 kB\n")
+    assert _system_memory_used_fraction(str(info)) == pytest.approx(0.6)
+    info.write_text("MemTotal: 1000 kB\nMemFree: 100 kB\n")
+    assert _system_memory_used_fraction(str(info)) is None
+
+
+def test_unavailable_memory_stats_do_not_keep_indexing_paused(store, settings, monkeypatch):
+    usage = {"value": 0.90}
+    monkeypatch.setattr("keeps.ai.runtime._system_memory_used_fraction", lambda: usage["value"])
+    runtime = _make_runtime(store, settings)
+    assert not runtime._background_ai_allowed()
+    usage["value"] = None
+    assert runtime._background_ai_allowed()
+
+
+def test_pressure_defers_background_index_and_resumes_below_75_percent(
+    qapp, store, settings, monkeypatch
+):
+    usage = {"fraction": 0.86}
+    monkeypatch.setattr(
+        "keeps.ai.runtime._system_memory_used_fraction", lambda: usage["fraction"]
+    )
+    settings.setValue("ai/embedding_backend", "legacy")
+    runtime = _make_runtime(store, settings, rag_text=True, image_semantic=True)
+    text_encoder = FakeEmbedder()
+    image_encoder = FakeImageEmbedder()
+    runtime._text_embedder = text_encoder
+    runtime._image_embedder = image_encoder
+    text_id = store.add("text", {"text/plain": b"defer this text"})
+    image_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(text_id, "text")
+    runtime.on_clip_captured(image_id, "image")
+
+    assert runtime._memory_pressure_paused
+    assert not text_encoder.calls and not image_encoder.calls
+    assert not store.get_all_embeddings(models.TEXT_EMBED.name)
+    assert not store.get_all_embeddings(models.IMAGE_EMBED.name)
+    runtime._housekeeping_tick()
+    assert text_encoder.unloaded and image_encoder.unloaded
+
+    usage["fraction"] = 0.80  # hysteresis: do not thrash between 75% and 85%
+    runtime._housekeeping_tick()
+    assert runtime._memory_pressure_paused
+    assert not text_encoder.calls and not image_encoder.calls
+
+    usage["fraction"] = 0.74
+    runtime._housekeeping_tick()
+    assert _pump_until(
+        qapp,
+        lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 1
+        and len(store.get_all_embeddings(models.IMAGE_EMBED.name)) == 1,
+    )
+    assert not runtime._memory_pressure_paused
+
+
+def test_pressure_defers_ocr_without_losing_its_sqlite_backlog(
+    qapp, store, settings, monkeypatch
+):
+    usage = {"fraction": 0.90}
+    monkeypatch.setattr(
+        "keeps.ai.runtime._system_memory_used_fraction", lambda: usage["fraction"]
+    )
+    monkeypatch.setattr("keeps.ai.runtime.available_ocr_language_codes", lambda codes: ["eslav"])
+    runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
+    engine = FakeOcrEngine()
+    runtime._ocr_engine = engine
+    monkeypatch.setattr(runtime, "_get_ocr_engine", lambda: engine)
+    clip_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(clip_id, "image")
+    assert engine.calls == 0 and store.clip_needs_ocr(clip_id)
+
+    runtime._housekeeping_tick()
+    assert engine.unloaded
+    usage["fraction"] = 0.74
+    runtime._housekeeping_tick()
+    assert _pump_until(qapp, lambda: not store.clip_needs_ocr(clip_id))
+    assert engine.calls == 1
 
 
 def test_finished_index_tasks_release_qt_signal_objects(qapp, store, settings):
@@ -1083,7 +1170,7 @@ def test_idle_unload_unloads_ocr_engine_when_past_threshold(qapp, store, setting
     runtime = _make_runtime(store, settings)
     fake = FakeOcrEngine()
     runtime._ocr_engine = fake
-    runtime._last_activity = time.monotonic() - 120  # 2 minutes ago
+    runtime._last_ocr_activity = time.monotonic() - 120  # 2 minutes ago
 
     runtime._check_idle_unload()
 
@@ -1104,6 +1191,35 @@ def test_idle_unload_checks_both_models_in_one_pass(qapp, store, settings):
 
     assert fake_embedder.unloaded is True
     assert fake_ocr.unloaded is True
+
+
+def test_idle_unload_tracks_ocr_separately_from_embeddings(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    runtime._text_embedder = FakeEmbedder()
+    runtime._ocr_engine = FakeOcrEngine()
+    runtime._last_activity = time.monotonic()  # recent text search
+    runtime._last_ocr_activity = time.monotonic() - 120
+
+    runtime._check_idle_unload()
+
+    assert not runtime._text_embedder.unloaded
+    assert runtime._ocr_engine is None
+
+
+def test_idle_unload_tracks_embeddings_separately_from_ocr(qapp, store, settings):
+    settings.setValue("ai/model_idle_unload_minutes", 1)
+    runtime = _make_runtime(store, settings)
+    runtime._text_embedder = FakeEmbedder()
+    runtime._ocr_engine = FakeOcrEngine()
+    runtime._last_activity = time.monotonic() - 120
+    runtime._last_ocr_activity = time.monotonic()  # recent screenshot OCR
+
+    runtime._check_idle_unload()
+
+    assert runtime._text_embedder.unloaded
+    assert runtime._ocr_engine is not None
+    assert not runtime._ocr_engine.unloaded
 
 
 def test_idle_unload_releases_native_heap_after_models_unload(
@@ -1171,28 +1287,28 @@ def test_text_embedding_touches_shared_idle_activity(qapp, store, settings):
     assert runtime._last_activity > old_activity
 
 
-def test_ocr_processing_touches_shared_idle_activity(qapp, store, settings):
+def test_ocr_processing_touches_ocr_idle_activity(qapp, store, settings):
     runtime = _make_runtime(store, settings, ocr=True, ocr_timing="immediate")
     runtime._ocr_engine = FakeOcrEngine()
     clip_id = store.add("image", {"image/png": PNG_1X1})
     old_activity = time.monotonic() - 120
-    runtime._last_activity = old_activity
+    runtime._last_ocr_activity = old_activity
 
     runtime._process_clip_ocr(clip_id)
 
     assert _pump_until(qapp, lambda: clip_id not in store.clips_missing_ocr())
-    assert runtime._last_activity > old_activity
+    assert runtime._last_ocr_activity > old_activity
 
 
-def test_loading_ocr_engine_touches_shared_idle_activity(qapp, store, settings):
+def test_loading_ocr_engine_touches_ocr_idle_activity(qapp, store, settings):
     runtime = _make_runtime(store, settings)
     runtime._ocr_engine = FakeOcrEngine()
     old_activity = time.monotonic() - 120
-    runtime._last_activity = old_activity
+    runtime._last_ocr_activity = old_activity
 
     runtime.load_ocr_engine()
 
-    assert runtime._last_activity > old_activity
+    assert runtime._last_ocr_activity > old_activity
 
 
 def test_idle_unload_never_fires_when_minutes_is_zero(qapp, store, settings):
