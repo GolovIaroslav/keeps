@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QCoreApplication, QSettings
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings
 
 from keeps.ai import models
 from keeps.ai.ranking import SearchMode
@@ -230,6 +230,34 @@ def test_background_ai_pool_is_bounded_for_model_memory(qapp, store, settings):
     runtime = _make_runtime(store, settings, rag_text=True, ocr=True)
 
     assert runtime.ai_task_max_threads == 1
+
+
+def test_finished_index_tasks_release_qt_signal_objects(qapp, store, settings):
+    settings.setValue("ai/embedding_backend", "legacy")
+    runtime = _make_runtime(
+        store, settings, rag_text=True, image_semantic=True, ocr=True, ocr_timing="immediate"
+    )
+    runtime._text_embedder = FakeEmbedder()
+    runtime._image_embedder = FakeImageEmbedder()
+    runtime._ocr_engine = FakeOcrEngine()
+
+    for index in range(3):
+        clip_id = store.add("text", {"text/plain": f"text {index}".encode()})
+        runtime.on_clip_captured(clip_id, "text")
+    image_id = store.add("image", {"image/png": PNG_1X1})
+    runtime.on_clip_captured(image_id, "image")
+
+    assert _pump_until(
+        qapp,
+        lambda: len(store.get_all_embeddings(models.TEXT_EMBED.name)) == 4
+        and len(store.get_all_embeddings(models.IMAGE_EMBED.name)) == 1,
+    )
+    _settle(qapp)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not [
+        child for child in runtime.children()
+        if type(child).__name__ in {"_TextEmbedSignals", "_ImageEmbedSignals", "_OcrSignals"}
+    ]
 
 
 def test_keyword_search_is_the_default_mode(qapp, store, settings):

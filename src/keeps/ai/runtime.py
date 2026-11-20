@@ -925,6 +925,7 @@ class AiRuntime(QObject):
             return
         signals = _TextEmbedSignals(self)
         signals.finished.connect(self._on_text_embed_done)
+        signals.finished.connect(signals.deleteLater)
         generation = self._index_generation
         task = _TextEmbedTask(
             self.embed_text,
@@ -984,6 +985,7 @@ class AiRuntime(QObject):
             return
         signals = _ImageEmbedSignals(self)
         signals.finished.connect(self._on_image_embed_done)
+        signals.finished.connect(signals.deleteLater)
         generation = self._index_generation
         task = _ImageEmbedTask(
             self.embed_image,
@@ -1132,6 +1134,7 @@ class AiRuntime(QObject):
             return
         signals = _OcrSignals(self)
         signals.finished.connect(self._on_ocr_done)
+        signals.finished.connect(signals.deleteLater)
         generation = self._ocr_generation
         task = _OcrTask(
             engine, clip_id, source_hash, png_bytes, signals,
