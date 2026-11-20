@@ -59,7 +59,9 @@ Keeps supports a switchable AI embedding engine in **Settings → AI → Embeddi
 
 The popup has an **Auto-index** checkbox and an **Index missing** button with a pending counter. Auto-index updates OCR and embeddings in the background even when Keywords is selected. Turning it off pauses new work; previously indexed items remain searchable. `Index missing` performs a one-off catch-up without permanently enabling background indexing. A warning appears after three days of paused indexing with work outstanding. Enabled AI models must already be downloaded in Settings; turning off an individual AI capability also stops its indexing. Model downloads are user-initiated.
 
-Indexing uses one background worker to bound simultaneous model memory use. `Settings → AI → Unload model from RAM after idle` defaults to 10 minutes; set it to `0` only if you explicitly want models to stay loaded. Loading a model again on the next OCR or semantic query is automatic.
+Indexing uses one background worker to bound simultaneous model memory use. `Settings → AI → Unload model from RAM after idle` defaults to 10 minutes; set it to `0` only if you explicitly want models to stay loaded while RAM pressure is low. OCR and embedding models have separate idle timers, so copying text does not keep the OCR recognizers loaded. Loading a model again on the next OCR or semantic query is automatic.
+
+On Linux, background OCR and embedding indexing is deferred when at least 85% of RAM is unavailable (`1 - MemAvailable / MemTotal` from `/proc/meminfo`). It resumes automatically once usage drops to 75% or lower. Already-running tasks finish safely; idle model sessions are also released under pressure. Capturing, pasting, and keyword search keep working, and deferred clips remain in SQLite for later indexing. Explicit semantic searches and manual model-loading requests are not blocked.
 
 ### Popup keymap
 
